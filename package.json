@@ -1,0 +1,12 @@
+{
+  "name": "mcp-rdc-web-build",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Website-specific orchestration composed with the Owned MCP and stock Desktop Commander.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/index.mjs && node --check src/contracts/tool-names.mjs && node --check src/contracts/boundary.mjs && node --check test/boundary.test.mjs"
+  }
+}

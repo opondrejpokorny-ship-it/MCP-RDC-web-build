@@ -1,0 +1,18 @@
+export const WEBSITE_TOOL_NAMES = Object.freeze([
+  "website_project_create",
+  "website_project_status",
+  "website_project_inspect",
+  "website_local_files_find",
+  "website_asset_import",
+  "website_asset_list",
+  "website_change_prepare",
+  "website_change_apply",
+  "website_build_check",
+  "website_preview_get",
+  "website_review_get",
+  "website_published_preview_get",
+  "website_change_reject",
+  "website_change_accept",
+  "website_release_prepare",
+  "website_release_activate",
+]);
