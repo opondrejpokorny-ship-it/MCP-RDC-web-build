@@ -3,10 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Website-specific orchestration composed with the Owned MCP and stock Desktop Commander.",
+  "description": "Static-web orchestration contracts composed with the Owned MCP and stock Desktop Commander.",
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.mjs && node --check src/contracts/tool-names.mjs && node --check src/contracts/boundary.mjs && node --check test/boundary.test.mjs"
+    "check": "node --check src/index.mjs && node --check src/contracts/tool-names.mjs && node --check src/contracts/boundary.mjs && node --check src/contracts/request-envelope.mjs && node --check scripts/public-safety.mjs && node --check test/boundary.test.mjs && node --check test/public-safety.test.mjs",
+    "public-safety": "node scripts/public-safety.mjs"
   }
 }
