@@ -1,0 +1,43 @@
+# Architecture boundary
+
+## Composition
+
+```text
+ChatGPT
+  -> Owned MCP policy / approval / audit boundary
+      -> MCP-RDC-web-build website orchestration
+          -> stock Desktop Commander execution primitives
+          -> RDC-web-build-backend managed website lifecycle
+```
+
+Stock Desktop Commander remains unchanged by this project.
+
+## Phase 1
+
+Only `static_web` is an active product contract.
+
+The orchestration layer may request bounded operations, but managed website state remains backend-authoritative. Low-level RDC execution must not silently bypass the managed lifecycle.
+
+## Gated transitions
+
+The backend owns the authoritative transitions for:
+
+1. review decision: Accept or Reject;
+2. Release Prepare;
+3. Release Activate.
+
+These remain distinct transitions even if a future human-facing UI offers a convenience flow that sequences them.
+
+## Mutation envelope
+
+Every future mutating orchestration request must bind to an explicit project plus:
+
+- operation ID;
+- expected workspace digest;
+- idempotency key;
+- caller class;
+- authorization evidence appropriate to the requested transition.
+
+The orchestration validator must receive the exact gated `website_*` transition being requested. Evidence is shape-accepted only when `decision=approved` and its bound transition exactly matches that requested transition; the backend remains the actual authorization verifier and lifecycle authority.
+
+Executable mutation tools are not enabled yet.

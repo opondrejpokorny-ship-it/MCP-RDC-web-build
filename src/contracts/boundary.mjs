@@ -9,12 +9,20 @@ export const WEBSITE_MCP_OWNS = Object.freeze([
 export const WEBSITE_MCP_DOES_NOT_OWN = Object.freeze([
   "managed_project_state",
   "snapshots_or_history",
+  "review_decision_authority",
   "release_artifacts_or_activation",
   "stock_rdc_execution_primitives",
-  "codebase_review_panel",
+  "review_preview_panel",
 ]);
 
-export const PUBLISH_SEQUENCE = Object.freeze([
+export const GATED_TRANSITIONS = Object.freeze([
+  "website_change_accept",
+  "website_change_reject",
+  "website_release_prepare",
+  "website_release_activate",
+]);
+
+export const PUBLICATION_SEQUENCE = Object.freeze([
   "website_change_accept",
   "website_release_prepare",
   "website_release_activate",
