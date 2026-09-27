@@ -18,6 +18,9 @@ export {
 export {
   createInProcessStaticBackendAdapter,
 } from "./adapters/in-process-static-backend.mjs";
+export {
+  createRdcLocalFilesAdapter,
+} from "./adapters/rdc-local-files.mjs";
 
 export const WEBSITE_TOOLSET_STATUS = Object.freeze({
   phase: "static_web_executable_read_review",

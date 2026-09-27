@@ -1,10 +1,12 @@
 import { WEBSITE_TOOL_NAMES } from "../contracts/tool-names.mjs";
+import { isSafeWindowsRelativePath } from "../security/windows-local-path.mjs";
 
 export const EXECUTABLE_WEBSITE_TOOL_NAMES = Object.freeze([
   "website_project_status",
   "website_project_inspect",
   "website_build_check",
   "website_preview_get",
+  "website_local_files_find",
 ]);
 
 const EXECUTABLE_SET = new Set(EXECUTABLE_WEBSITE_TOOL_NAMES);
@@ -14,6 +16,10 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const OPERATION_REVISION_RE = /^[1-9][0-9]{0,19}$/;
 const PROJECT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CODE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const ROOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const LOCAL_FILE_ID_RE = /^localfile-[A-Za-z0-9_-]{32,128}$/;
+const EXTENSION_RE = /^[A-Za-z0-9]{1,16}$/;
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SEVERITIES = new Set(["error", "warning", "info"]);
 const WORKFLOW_STATES = new Set([
   "working",
@@ -40,6 +46,23 @@ function exactKeys(value, requiredKeys) {
   const required = [...requiredKeys].sort();
   return keys.length === required.length
     && keys.every((key, index) => key === required[index]);
+}
+
+function snapshotOwnDataFields(value, fields) {
+  if (!isPlainObject(value)) return null;
+  const snapshot = {};
+  for (const field of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    if (
+      !descriptor
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, "value")
+    ) {
+      return null;
+    }
+    snapshot[field] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
 }
 
 function validProjectId(value) {
@@ -90,6 +113,29 @@ function validateOperationBoundRequest(args) {
     && validDigest(args.expected_workspace_digest);
 }
 
+function validateLocalFilesRequest(args) {
+  if (!exactKeys(args, ["root_id", "query", "extensions", "max_results"])) return false;
+  if (typeof args.root_id !== "string" || !ROOT_ID_RE.test(args.root_id)) return false;
+  if (
+    typeof args.query !== "string"
+    || args.query.length > 128
+    || /[\\/\0\r\n\t]/.test(args.query)
+    || /[\u0000-\u001f\u007f]/.test(args.query)
+    || !/^[\x20-\x7e]*$/.test(args.query)
+  ) return false;
+  if (!Array.isArray(args.extensions) || args.extensions.length > 16) return false;
+  const seen = new Set();
+  for (const extension of args.extensions) {
+    if (typeof extension !== "string" || !EXTENSION_RE.test(extension)) return false;
+    const folded = extension.toLowerCase();
+    if (seen.has(folded)) return false;
+    seen.add(folded);
+  }
+  return Number.isInteger(args.max_results)
+    && args.max_results >= 1
+    && args.max_results <= 50;
+}
+
 const PROJECT_ID_SCHEMA = Object.freeze({
   type: "string",
   minLength: 1,
@@ -112,6 +158,37 @@ const OPERATION_REVISION_SCHEMA = Object.freeze({
 const DIGEST_SCHEMA = Object.freeze({
   type: "string",
   pattern: "^[a-f0-9]{64}$",
+});
+
+const ROOT_ID_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+});
+
+const QUERY_SCHEMA = Object.freeze({
+  type: "string",
+  maxLength: 128,
+  pattern: "^[^\\\\/\\u0000-\\u001f\\u007f]*$",
+});
+
+const EXTENSIONS_SCHEMA = Object.freeze({
+  type: "array",
+  maxItems: 16,
+  uniqueItems: true,
+  items: Object.freeze({
+    type: "string",
+    minLength: 1,
+    maxLength: 16,
+    pattern: "^[A-Za-z0-9]{1,16}$",
+  }),
+});
+
+const MAX_RESULTS_SCHEMA = Object.freeze({
+  type: "integer",
+  minimum: 1,
+  maximum: 50,
 });
 
 function closedSchema(properties, required) {
@@ -167,6 +244,19 @@ const TOOL_DEFINITIONS = Object.freeze([
         expected_workspace_digest: DIGEST_SCHEMA,
       },
       ["project_id", "operation_id", "operation_revision", "expected_workspace_digest"],
+    ),
+  }),
+  Object.freeze({
+    name: "website_local_files_find",
+    description: "Discover bounded metadata for files under a pre-authorized opaque local root without returning file contents or absolute paths.",
+    inputSchema: closedSchema(
+      {
+        root_id: ROOT_ID_SCHEMA,
+        query: QUERY_SCHEMA,
+        extensions: EXTENSIONS_SCHEMA,
+        max_results: MAX_RESULTS_SCHEMA,
+      },
+      ["root_id", "query", "extensions", "max_results"],
     ),
   }),
 ]);
@@ -273,6 +363,72 @@ function sanitizeFindings(findings) {
   return Object.freeze(projected);
 }
 
+function strictIsoUtc(value) {
+  if (typeof value !== "string" || !ISO_UTC_RE.test(value)) return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function validLocalRelativePath(value) {
+  return isSafeWindowsRelativePath(value);
+}
+
+function sanitizeLocalFileResult(result, args) {
+  const envelope = snapshotOwnDataFields(result, ["root_id", "files"]);
+  if (!envelope || envelope.root_id !== args.root_id) return null;
+  if (!Array.isArray(envelope.files) || envelope.files.length > args.max_results) return null;
+  const projected = [];
+  const seen = new Set();
+  for (const entry of envelope.files) {
+    const file = snapshotOwnDataFields(entry, [
+      "local_file_id",
+      "relative_path",
+      "size_bytes",
+      "extension",
+      "modified_at",
+    ]);
+    if (
+      !file
+      || typeof file.local_file_id !== "string"
+      || !LOCAL_FILE_ID_RE.test(file.local_file_id)
+      || seen.has(file.local_file_id)
+      || !validLocalRelativePath(file.relative_path)
+      || !Number.isSafeInteger(file.size_bytes)
+      || file.size_bytes < 0
+      || file.size_bytes > 1024 * 1024 * 1024
+      || typeof file.extension !== "string"
+      || (file.extension !== "" && !EXTENSION_RE.test(file.extension))
+      || file.extension !== file.extension.toLowerCase()
+      || !strictIsoUtc(file.modified_at)
+    ) {
+      return null;
+    }
+    const basename = file.relative_path.split("/").at(-1);
+    const dot = basename.lastIndexOf(".");
+    const actualExtension = dot > 0 && dot < basename.length - 1
+      ? basename.slice(dot + 1).toLowerCase()
+      : "";
+    if (actualExtension !== file.extension) return null;
+    const requestedExtensions = args.extensions.map((value) => value.toLowerCase());
+    if (requestedExtensions.length > 0 && !requestedExtensions.includes(file.extension)) return null;
+    if (args.query !== "" && !basename.toLowerCase().includes(args.query.toLowerCase())) return null;
+    seen.add(file.local_file_id);
+    projected.push(Object.freeze({
+      local_file_id: file.local_file_id,
+      relative_path: file.relative_path,
+      size_bytes: file.size_bytes,
+      extension: file.extension,
+      modified_at: file.modified_at,
+    }));
+  }
+  projected.sort((a, b) => a.relative_path.localeCompare(b.relative_path));
+  return Object.freeze({
+    ok: true,
+    root_id: args.root_id,
+    files: Object.freeze(projected),
+  });
+}
+
 function validLoopbackPreview(preview, args) {
   if (!isPlainObject(preview)) return false;
   if (!validOperationId(preview.preview_id)) return false;
@@ -321,6 +477,7 @@ function requireBackend(backend) {
 
 export function createStaticWebsiteToolset({
   backend,
+  localFiles = null,
   previewTtlMs = 300_000,
   maxCachedPreviews = 8,
   scheduler = {
@@ -335,6 +492,12 @@ export function createStaticWebsiteToolset({
   },
 }) {
   requireBackend(backend);
+  if (
+    localFiles !== null
+    && (!isPlainObject(localFiles) || typeof localFiles.findLocalFiles !== "function")
+  ) {
+    throw new TypeError("local_files_adapter_invalid");
+  }
   if (!Number.isInteger(previewTtlMs) || previewTtlMs < 1_000 || previewTtlMs > 3_600_000) {
     throw new TypeError("preview_ttl_invalid");
   }
@@ -598,23 +761,46 @@ export function createStaticWebsiteToolset({
     });
   }
 
+  async function localFilesFind(args) {
+    if (!localFiles) return fail("CAPABILITY_UNAVAILABLE");
+    const raw = await localFiles.findLocalFiles({
+      root_id: args.root_id,
+      query: args.query,
+      extensions: [...args.extensions],
+      max_results: args.max_results,
+    });
+    return sanitizeLocalFileResult(raw, args) ?? fail("LOCAL_FILE_SOURCE_INVALID");
+  }
+
+  const visibleTools = Object.freeze(
+    TOOL_DEFINITIONS.filter((tool) =>
+      tool.name !== "website_local_files_find" || localFiles !== null
+    ),
+  );
+
   const handlers = Object.freeze({
     website_project_status: projectStatus,
     website_project_inspect: projectInspect,
     website_build_check: buildCheck,
     website_preview_get: previewGet,
+    website_local_files_find: localFilesFind,
   });
 
   async function callTool(name, args) {
     if (!DECLARED_SET.has(name)) return fail("TOOL_NOT_FOUND");
     if (!EXECUTABLE_SET.has(name)) return fail("CAPABILITY_UNAVAILABLE");
+    if (name === "website_local_files_find" && localFiles === null) {
+      return fail("CAPABILITY_UNAVAILABLE");
+    }
     if (closing || closed) return fail("TOOLSET_CLOSED");
 
     const valid = name === "website_project_status"
       ? validateStatusRequest(args)
       : name === "website_project_inspect"
         ? validateDigestBoundRequest(args)
-        : validateOperationBoundRequest(args);
+        : name === "website_local_files_find"
+          ? validateLocalFilesRequest(args)
+          : validateOperationBoundRequest(args);
     if (!valid) return fail("REQUEST_INVALID");
 
     try {
@@ -629,6 +815,14 @@ export function createStaticWebsiteToolset({
         return fail("OPERATION_IDENTITY_UNAVAILABLE");
       }
       if (error?.code === "preview_close_failed") return fail("PREVIEW_CLOSE_FAILED");
+      if (error?.code === "local_file_root_unavailable") return fail("LOCAL_FILE_ROOT_UNAVAILABLE");
+      if (error?.code === "local_file_source_failure") return fail("LOCAL_FILE_SOURCE_FAILURE");
+      if (
+        error?.code === "local_file_source_invalid"
+        || error?.code === "local_file_id_collision"
+        || error?.code === "local_file_id_invalid"
+      ) return fail("LOCAL_FILE_SOURCE_INVALID");
+      if (name === "website_local_files_find") return fail("LOCAL_FILE_SOURCE_FAILURE");
       return fail("BACKEND_FAILURE");
     }
   }
@@ -660,8 +854,15 @@ export function createStaticWebsiteToolset({
     }
   }
 
+  const runtimeStatus = Object.freeze({
+    executable_tools: true,
+    executable_tool_names: Object.freeze(visibleTools.map((tool) => tool.name)),
+    local_files_composed: localFiles !== null,
+  });
+
   return Object.freeze({
-    tools: TOOL_DEFINITIONS,
+    tools: visibleTools,
+    status: runtimeStatus,
     callTool,
     close,
   });

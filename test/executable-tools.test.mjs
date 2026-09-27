@@ -71,12 +71,16 @@ test("executable registry exposes only the safe read/review static_web subset", 
     "website_project_inspect",
     "website_build_check",
     "website_preview_get",
+    "website_local_files_find",
   ]);
   assert.equal(WEBSITE_TOOLSET_STATUS.executable_tools, true);
-  assert.deepEqual(
-    WEBSITE_TOOLSET_STATUS.executable_tool_names,
-    EXECUTABLE_WEBSITE_TOOL_NAMES,
-  );
+  assert.deepEqual(WEBSITE_TOOLSET_STATUS.executable_tool_names, [
+    "website_project_status",
+    "website_project_inspect",
+    "website_build_check",
+    "website_preview_get",
+  ]);
+  assert.ok(EXECUTABLE_WEBSITE_TOOL_NAMES.includes("website_local_files_find"));
 });
 
 test("tool schemas are closed and model cannot inject authority fields", async () => {
