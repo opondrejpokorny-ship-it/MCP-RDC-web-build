@@ -33,6 +33,7 @@ These remain distinct transitions even if a future human-facing UI offers a conv
 Every future mutating orchestration request must bind to an explicit project plus:
 
 - operation ID;
+- server-issued operation revision / incarnation;
 - expected workspace digest;
 - idempotency key;
 - caller class;
@@ -40,4 +41,6 @@ Every future mutating orchestration request must bind to an explicit project plu
 
 The orchestration validator must receive the exact gated `website_*` transition being requested. Evidence is shape-accepted only when `decision=approved` and its bound transition exactly matches that requested transition; the backend remains the actual authorization verifier and lifecycle authority.
 
-Executable mutation tools are not enabled yet.
+A bounded executable read/review subset is enabled for static_web: project status, project inspect, build/validation check and identity-bound Development Preview. Build and preview require the backend's immutable operation revision in addition to project, operation ID and workspace digest, and the adapter rechecks the operation fence around awaited work. The adapter exposes only fixed backend methods and does not provide arbitrary action/method passthrough.
+
+Executable mutation tools are not enabled yet. Accept, Reject, Release Prepare and Release Activate remain backend-human-gated future composition work and are not reachable through this executable subset.

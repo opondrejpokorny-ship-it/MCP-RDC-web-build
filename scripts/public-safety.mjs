@@ -29,6 +29,7 @@ export function scanPublicTree(root) {
 
   function walk(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === ".git") continue;
       if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
       const fullPath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
@@ -36,8 +37,7 @@ export function scanPublicTree(root) {
         continue;
       }
       const bytes = fs.readFileSync(fullPath);
-      if (bytes.includes(0)) continue;
-      const rules = scanPublicText(bytes.toString("utf8"));
+      const rules = scanPublicText(bytes.toString("latin1"));
       for (const rule of rules) {
         findings.push({ file: path.relative(root, fullPath), rule });
       }

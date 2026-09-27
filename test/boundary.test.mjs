@@ -14,9 +14,15 @@ test("website tool names are unique", () => {
   assert.equal(new Set(WEBSITE_TOOL_NAMES).size, WEBSITE_TOOL_NAMES.length);
 });
 
-test("phase 1 exposes static_web only", () => {
+test("phase 1 exposes static_web only with a bounded executable subset", () => {
   assert.deepEqual(WEBSITE_TOOLSET_STATUS.supported_project_types, ["static_web"]);
-  assert.equal(WEBSITE_TOOLSET_STATUS.executable_tools, false);
+  assert.equal(WEBSITE_TOOLSET_STATUS.executable_tools, true);
+  assert.deepEqual(WEBSITE_TOOLSET_STATUS.executable_tool_names, [
+    "website_project_status",
+    "website_project_inspect",
+    "website_build_check",
+    "website_preview_get",
+  ]);
 });
 
 test("accept, release prepare, and release activate remain distinct", () => {

@@ -30,7 +30,18 @@ This initial public repository is clean-room bootstrap code only. No private his
 
 ## Current status
 
-Bootstrap contract only. The exported tool names are not executable MCP tools yet.
+The Phase 1 contract remains `static_web` only. A deliberately narrow executable read/review subset is now implemented:
+
+- `website_project_status`
+- `website_project_inspect`
+- `website_build_check`
+- `website_preview_get`
+
+These tools use a fixed backend adapter boundary, closed request schemas, bounded output projection and loopback-only Development Preview verification. Build and preview are bound to the exact server-issued operation incarnation `project_id + operation_id + operation_revision + workspace_digest`; the in-process adapter rechecks that fence before and after awaited backend work. The adapter composes with the backend without exposing arbitrary backend RPC.
+
+All mutating, asset, Review Panel, published-preview and release tools remain declared future contract names but return capability-unavailable / are absent from the executable registry. This slice does not enable Accept, Reject, Release Prepare, Release Activate, customer publication or a silent publish shortcut.
+
+A local cross-repository smoke has verified the executable subset against backend main `48bb175f47eea414c27839bec71969c2180c5288`, including server-issued operation revision binding, authoritative validation and an actual HTTP loopback Development Preview. Owned MCP product composition and deployment remain separate future gates.
 
 `"private": true` in `package.json` prevents accidental npm publication; it does not make this Git repository private.
 
