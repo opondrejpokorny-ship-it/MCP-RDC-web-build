@@ -36,7 +36,7 @@ test("current repository tree passes the public-safety gate", () => {
   assert.deepEqual(scanPublicTree(process.cwd()), []);
 });
 
-test("public-safety scans a tree and ignores .git/node_modules/coverage", () => {
+test("public-safety scans a tree and ignores Git metadata/dependency directories", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rdc-web-public-safety-"));
   try {
     fs.writeFileSync(path.join(root, "safe.txt"), "safe");
@@ -48,6 +48,35 @@ test("public-safety scans a tree and ignores .git/node_modules/coverage", () => 
     const findings = scanPublicTree(root);
     assert.deepEqual(findings, [
       { file: "bad.txt", rule: "private-github-url" },
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("public-safety still scans ordinary files named coverage or node_modules", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rdc-web-public-safety-files-"));
+  try {
+    fs.writeFileSync(path.join(root, "coverage"), badSamples["github-token"]);
+    fs.writeFileSync(path.join(root, "node_modules"), badSamples["private-key"]);
+    assert.deepEqual(scanPublicTree(root).sort((a, b) => a.file.localeCompare(b.file)), [
+      { file: "coverage", rule: "github-token" },
+      { file: "node_modules", rule: "private-key" },
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("public-safety scans ASCII secret patterns in files containing NUL bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rdc-web-public-safety-binary-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "payload.bin"),
+      Buffer.concat([Buffer.from([0, 1, 0]), Buffer.from(badSamples["github-token"], "ascii")]),
+    );
+    assert.deepEqual(scanPublicTree(root), [
+      { file: "payload.bin", rule: "github-token" },
     ]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
