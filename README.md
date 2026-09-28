@@ -30,18 +30,24 @@ This initial public repository is clean-room bootstrap code only. No private his
 
 ## Current status
 
-The Phase 1 contract remains `static_web` only. A deliberately narrow executable read/review subset is now implemented:
+The Phase 1 contract remains `static_web` only. The default core composition exposes a deliberately narrow read/review subset:
 
 - `website_project_status`
 - `website_project_inspect`
 - `website_build_check`
 - `website_preview_get`
 
-These tools use a fixed backend adapter boundary, closed request schemas, bounded output projection and loopback-only Development Preview verification. Build and preview are bound to the exact server-issued operation incarnation `project_id + operation_id + operation_revision + workspace_digest`; the in-process adapter rechecks that fence before and after awaited backend work. The adapter composes with the backend without exposing arbitrary backend RPC.
+An optional trusted local-files composition also exposes `website_local_files_find`. It accepts only an opaque pre-authorized `root_id` plus bounded search filters and returns opaque `local_file_id` metadata; absolute paths and file contents stay inside trusted composition.
 
-All mutating, asset, Review Panel, published-preview and release tools remain declared future contract names but return capability-unavailable / are absent from the executable registry. This slice does not enable Accept, Reject, Release Prepare, Release Activate, customer publication or a silent publish shortcut.
+This feature branch adds a verified orchestration checkpoint for `website_asset_import`. The tool is advertised only when both the trusted local-files adapter and a backend Media Library `importLocalAsset` authority are composed. Its model-facing request is closed to `project_id + local_file_id + size_bytes + modified_at`; the model cannot provide an absolute path, bytes, caller/approval authority or idempotency key. Exact retry identity is derived internally, and the result is re-projected to bounded managed-asset metadata with project/source/size binding.
 
-A local cross-repository smoke has verified the executable subset against backend main `48bb175f47eea414c27839bec71969c2180c5288`, including server-issued operation revision binding, authoritative validation and an actual HTTP loopback Development Preview. Owned MCP product composition and deployment remain separate future gates.
+The checkpoint does **not** make asset import production-ready by itself. Two external composition gates remain before main integration: the authoritative backend Media Library must close its cross-instance state/idempotency locking blocker, and the local-source bridge must provide identity-bound raw bytes behind Desktop Commander path/allowed-directory guardrails without routing binary payloads through ChatGPT/model-facing MCP content. Stock `read_file` is presentation-oriented and is not treated as the generic raw-byte provider for this purpose.
+
+Build/preview still use the fixed backend adapter boundary, closed schemas, bounded output projection and loopback-only Development Preview verification. Build and preview are bound to the exact server-issued operation incarnation `project_id + operation_id + operation_revision + workspace_digest`; the in-process adapter rechecks that fence before and after awaited backend work. Asset import does not add workspace, acceptance, release or publication authority.
+
+Accept, Reject, Release Prepare, Release Activate, published-preview control and customer publication remain outside this executable slice. Preview != Accept != Release Prepare != Release Activate, and no asset-import path creates a silent publish shortcut.
+
+The current feature implementation passed local 94/94 tests, syntax/public-safety/audit/diff gates, Codex Terra P0/P1 review and exact-head push CI. A read-only cross-repository smoke against the current Media Library source verified import/replay shape, but production E2E remains intentionally blocked on the two gates above. Exact commit/CI evidence is maintained in the project Work Log and Active Work Registry. Owned MCP product composition and deployment remain separate future gates.
 
 `"private": true` in `package.json` prevents accidental npm publication; it does not make this Git repository private.
 
