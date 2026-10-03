@@ -1,5 +1,9 @@
+import crypto from "node:crypto";
 import { WEBSITE_TOOL_NAMES } from "../contracts/tool-names.mjs";
-import { isSafeWindowsRelativePath } from "../security/windows-local-path.mjs";
+import {
+  isSafeWindowsLocalSegment,
+  isSafeWindowsRelativePath,
+} from "../security/windows-local-path.mjs";
 
 export const EXECUTABLE_WEBSITE_TOOL_NAMES = Object.freeze([
   "website_project_status",
@@ -7,6 +11,7 @@ export const EXECUTABLE_WEBSITE_TOOL_NAMES = Object.freeze([
   "website_build_check",
   "website_preview_get",
   "website_local_files_find",
+  "website_asset_import",
 ]);
 
 const EXECUTABLE_SET = new Set(EXECUTABLE_WEBSITE_TOOL_NAMES);
@@ -18,6 +23,16 @@ const PROJECT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CODE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const ROOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const LOCAL_FILE_ID_RE = /^localfile-[A-Za-z0-9_-]{32,128}$/;
+const ASSET_ID_RE = /^asset-[A-Za-z0-9_-]{32,128}$/;
+const SHA256_RE = /^sha256:[a-f0-9]{64}$/;
+const MAX_ASSET_IMPORT_BYTES = 1024 * 1024 * 1024;
+const ASSET_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+]);
 const EXTENSION_RE = /^[A-Za-z0-9]{1,16}$/;
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SEVERITIES = new Set(["error", "warning", "info"]);
@@ -136,6 +151,63 @@ function validateLocalFilesRequest(args) {
     && args.max_results <= 50;
 }
 
+function validateAssetImportRequest(args) {
+  return exactKeys(args, [
+    "project_id",
+    "local_file_id",
+    "size_bytes",
+    "modified_at",
+  ])
+    && validProjectId(args.project_id)
+    && typeof args.local_file_id === "string"
+    && LOCAL_FILE_ID_RE.test(args.local_file_id)
+    && Number.isSafeInteger(args.size_bytes)
+    && args.size_bytes >= 0
+    && args.size_bytes <= MAX_ASSET_IMPORT_BYTES
+    && strictIsoUtc(args.modified_at);
+}
+
+function assetImportIdempotencyKey(args) {
+  const canonical = JSON.stringify({
+    project_id: args.project_id,
+    local_file_id: args.local_file_id,
+    size_bytes: args.size_bytes,
+    modified_at: args.modified_at,
+  });
+  return "website-asset-import:"
+    + crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function trustedAssetImportBinding(raw, args) {
+  const binding = snapshotOwnDataFields(raw, [
+    "size_bytes",
+    "modified_at",
+    "content_digest",
+  ]);
+  if (
+    !binding
+    || !exactKeys(raw, ["size_bytes", "modified_at", "content_digest"])
+    || !Number.isSafeInteger(binding.size_bytes)
+    || binding.size_bytes < 0
+    || binding.size_bytes > MAX_ASSET_IMPORT_BYTES
+    || !strictIsoUtc(binding.modified_at)
+    || typeof binding.content_digest !== "string"
+    || !SHA256_RE.test(binding.content_digest)
+  ) return null;
+  if (
+    binding.size_bytes !== args.size_bytes
+    || binding.modified_at !== args.modified_at
+  ) return false;
+  return binding;
+}
+
+function expectedSourceHandleDigest(localFileId) {
+  return "sha256:"
+    + crypto.createHash("sha256")
+      .update("local_file_id:" + localFileId, "utf8")
+      .digest("hex");
+}
+
 const PROJECT_ID_SCHEMA = Object.freeze({
   type: "string",
   minLength: 1,
@@ -189,6 +261,22 @@ const MAX_RESULTS_SCHEMA = Object.freeze({
   type: "integer",
   minimum: 1,
   maximum: 50,
+});
+
+const LOCAL_FILE_ID_SCHEMA = Object.freeze({
+  type: "string",
+  pattern: "^localfile-[A-Za-z0-9_-]{32,128}$",
+});
+
+const ASSET_SIZE_SCHEMA = Object.freeze({
+  type: "integer",
+  minimum: 0,
+  maximum: MAX_ASSET_IMPORT_BYTES,
+});
+
+const MODIFIED_AT_SCHEMA = Object.freeze({
+  type: "string",
+  pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
 });
 
 function closedSchema(properties, required) {
@@ -257,6 +345,19 @@ const TOOL_DEFINITIONS = Object.freeze([
         max_results: MAX_RESULTS_SCHEMA,
       },
       ["root_id", "query", "extensions", "max_results"],
+    ),
+  }),
+  Object.freeze({
+    name: "website_asset_import",
+    description: "Import one previously discovered opaque local file into the authoritative project Media Library without exposing local paths or file bytes.",
+    inputSchema: closedSchema(
+      {
+        project_id: PROJECT_ID_SCHEMA,
+        local_file_id: LOCAL_FILE_ID_SCHEMA,
+        size_bytes: ASSET_SIZE_SCHEMA,
+        modified_at: MODIFIED_AT_SCHEMA,
+      },
+      ["project_id", "local_file_id", "size_bytes", "modified_at"],
     ),
   }),
 ]);
@@ -429,6 +530,57 @@ function sanitizeLocalFileResult(result, args) {
   });
 }
 
+function sanitizeAssetImportResult(result, args) {
+  const envelope = snapshotOwnDataFields(result, ["ok", "asset"]);
+  if (!envelope || envelope.ok !== true) return null;
+  const asset = snapshotOwnDataFields(envelope.asset, [
+    "asset_id",
+    "project_id",
+    "source_class",
+    "source_handle_digest",
+    "content_digest",
+    "size_bytes",
+    "mime_type",
+    "relative_name",
+    "created_at",
+  ]);
+  if (
+    !asset
+    || typeof asset.asset_id !== "string"
+    || !ASSET_ID_RE.test(asset.asset_id)
+    || asset.project_id !== args.project_id
+    || asset.source_class !== "local_file"
+    || typeof asset.source_handle_digest !== "string"
+    || !SHA256_RE.test(asset.source_handle_digest)
+    || asset.source_handle_digest !== expectedSourceHandleDigest(args.local_file_id)
+    || typeof asset.content_digest !== "string"
+    || !SHA256_RE.test(asset.content_digest)
+    || !Number.isSafeInteger(asset.size_bytes)
+    || asset.size_bytes !== args.size_bytes
+    || asset.size_bytes < 0
+    || asset.size_bytes > MAX_ASSET_IMPORT_BYTES
+    || !ASSET_MIME_TYPES.has(asset.mime_type)
+    || !isSafeWindowsLocalSegment(asset.relative_name)
+    || !strictIsoUtc(asset.created_at)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ok: true,
+    asset: Object.freeze({
+      asset_id: asset.asset_id,
+      project_id: asset.project_id,
+      source_class: asset.source_class,
+      source_handle_digest: asset.source_handle_digest,
+      content_digest: asset.content_digest,
+      size_bytes: asset.size_bytes,
+      mime_type: asset.mime_type,
+      relative_name: asset.relative_name,
+      created_at: asset.created_at,
+    }),
+  });
+}
+
 function validLoopbackPreview(preview, args) {
   if (!isPlainObject(preview)) return false;
   if (!validOperationId(preview.preview_id)) return false;
@@ -498,6 +650,11 @@ export function createStaticWebsiteToolset({
   ) {
     throw new TypeError("local_files_adapter_invalid");
   }
+  const assetImportComposed = localFiles !== null
+    && typeof localFiles.getLocalFileImportBinding === "function"
+    && typeof localFiles.statLocalFile === "function"
+    && typeof localFiles.readLocalFile === "function"
+    && typeof backend.importLocalAsset === "function";
   if (!Number.isInteger(previewTtlMs) || previewTtlMs < 1_000 || previewTtlMs > 3_600_000) {
     throw new TypeError("preview_ttl_invalid");
   }
@@ -772,10 +929,33 @@ export function createStaticWebsiteToolset({
     return sanitizeLocalFileResult(raw, args) ?? fail("LOCAL_FILE_SOURCE_INVALID");
   }
 
+  async function assetImport(args) {
+    if (!assetImportComposed) return fail("CAPABILITY_UNAVAILABLE");
+    const rawBinding = await localFiles.getLocalFileImportBinding(args.local_file_id);
+    if (rawBinding === null || rawBinding === undefined) return fail("LOCAL_FILE_STALE");
+    const binding = trustedAssetImportBinding(rawBinding, args);
+    if (binding === false) return fail("LOCAL_FILE_STALE");
+    if (binding === null) return fail("LOCAL_FILE_SOURCE_INVALID");
+
+    const raw = await backend.importLocalAsset({
+      project_id: args.project_id,
+      local_file_id: args.local_file_id,
+      expected_source: {
+        size_bytes: args.size_bytes,
+        modified_at: args.modified_at,
+      },
+      expected_content_digest: binding.content_digest,
+      idempotency_key: assetImportIdempotencyKey(args),
+    });
+    return sanitizeAssetImportResult(raw, args) ?? fail("ASSET_RESPONSE_INVALID");
+  }
+
   const visibleTools = Object.freeze(
-    TOOL_DEFINITIONS.filter((tool) =>
-      tool.name !== "website_local_files_find" || localFiles !== null
-    ),
+    TOOL_DEFINITIONS.filter((tool) => {
+      if (tool.name === "website_local_files_find") return localFiles !== null;
+      if (tool.name === "website_asset_import") return assetImportComposed;
+      return true;
+    }),
   );
 
   const handlers = Object.freeze({
@@ -784,12 +964,16 @@ export function createStaticWebsiteToolset({
     website_build_check: buildCheck,
     website_preview_get: previewGet,
     website_local_files_find: localFilesFind,
+    website_asset_import: assetImport,
   });
 
   async function callTool(name, args) {
     if (!DECLARED_SET.has(name)) return fail("TOOL_NOT_FOUND");
     if (!EXECUTABLE_SET.has(name)) return fail("CAPABILITY_UNAVAILABLE");
     if (name === "website_local_files_find" && localFiles === null) {
+      return fail("CAPABILITY_UNAVAILABLE");
+    }
+    if (name === "website_asset_import" && !assetImportComposed) {
       return fail("CAPABILITY_UNAVAILABLE");
     }
     if (closing || closed) return fail("TOOLSET_CLOSED");
@@ -800,7 +984,9 @@ export function createStaticWebsiteToolset({
         ? validateDigestBoundRequest(args)
         : name === "website_local_files_find"
           ? validateLocalFilesRequest(args)
-          : validateOperationBoundRequest(args);
+          : name === "website_asset_import"
+            ? validateAssetImportRequest(args)
+            : validateOperationBoundRequest(args);
     if (!valid) return fail("REQUEST_INVALID");
 
     try {
@@ -823,6 +1009,21 @@ export function createStaticWebsiteToolset({
         || error?.code === "local_file_id_invalid"
       ) return fail("LOCAL_FILE_SOURCE_INVALID");
       if (name === "website_local_files_find") return fail("LOCAL_FILE_SOURCE_FAILURE");
+      if (name === "website_asset_import") {
+        if (error?.code === "asset_project_unavailable") return fail("ASSET_PROJECT_UNAVAILABLE");
+        if (error?.code === "asset_source_stale") return fail("LOCAL_FILE_STALE");
+        if (error?.code === "asset_source_changed") return fail("LOCAL_FILE_CHANGED");
+        if (error?.code === "asset_content_digest_mismatch") return fail("LOCAL_FILE_CHANGED");
+        if (error?.code === "asset_too_large") return fail("ASSET_TOO_LARGE");
+        if (
+          error?.code === "asset_type_unsupported"
+          || error?.code === "asset_type_mismatch"
+        ) return fail("ASSET_TYPE_UNSUPPORTED");
+        if (error?.code === "asset_idempotency_conflict") {
+          return fail("ASSET_IDEMPOTENCY_CONFLICT");
+        }
+        return fail("ASSET_IMPORT_FAILURE");
+      }
       return fail("BACKEND_FAILURE");
     }
   }
@@ -858,6 +1059,7 @@ export function createStaticWebsiteToolset({
     executable_tools: true,
     executable_tool_names: Object.freeze(visibleTools.map((tool) => tool.name)),
     local_files_composed: localFiles !== null,
+    asset_import_composed: assetImportComposed,
   });
 
   return Object.freeze({

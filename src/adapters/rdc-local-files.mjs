@@ -5,7 +5,10 @@ const ROOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const EXTENSION_RE = /^[A-Za-z0-9]{1,16}$/;
 const LOCAL_FILE_ID_RE = /^localfile-[A-Za-z0-9_-]{32,128}$/;
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const DEFAULT_MAX_LIVE_FILE_IDS = 4096;
+const DEFAULT_MAX_PENDING_CAPTURES = 2;
 const MAX_SCAN_ENTRIES = 5000;
 
 function safeError(code) {
@@ -102,7 +105,7 @@ function parseCanonicalWindowsPath(value, { allowDriveRoot = false } = {}) {
 }
 
 function foldedWindowsPath(value) {
-  return value.toLowerCase();
+  return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
 function strictRelativePath(rootPath, candidatePath) {
@@ -153,6 +156,57 @@ function requireRdc(rdc) {
   }
 }
 
+function requireRawCapture(rawCapture) {
+  if (rawCapture !== null && (!isPlainObject(rawCapture) || typeof rawCapture.captureFile !== "function")) {
+    throw new TypeError("local_file_raw_capture_invalid");
+  }
+}
+
+function trustedCaptureSnapshot(raw, { includeBytes }) {
+  try {
+    const source = snapshotOwnDataFields(raw, [
+      "canonical_path",
+      "source_identity",
+      "size_bytes",
+      "modified_at",
+      "content_digest",
+      "hard_link_count",
+      "is_file",
+      "is_symlink",
+      "is_reparse_point",
+      "bytes",
+    ]);
+    if (
+      !source
+      || typeof source.canonical_path !== "string"
+      || typeof source.source_identity !== "string"
+      || source.source_identity.length < 1
+      || source.source_identity.length > 8192
+      || !Number.isSafeInteger(source.size_bytes)
+      || source.size_bytes < 0
+      || !strictIsoUtc(source.modified_at)
+      || typeof source.content_digest !== "string"
+      || !DIGEST_RE.test(source.content_digest)
+      || source.hard_link_count !== 1
+      || source.is_file !== true
+      || source.is_symlink !== false
+      || source.is_reparse_point !== false
+      || (includeBytes
+        ? (!Buffer.isBuffer(source.bytes) && !(source.bytes instanceof Uint8Array))
+        : source.bytes !== null)
+    ) {
+      throw safeError("local_file_source_invalid");
+    }
+    return Object.freeze({
+      ...source,
+      bytes: includeBytes ? Buffer.from(source.bytes) : null,
+    });
+  } catch (error) {
+    if (error?.code === "local_file_source_invalid") throw error;
+    throw safeError("local_file_source_failure");
+  }
+}
+
 function snapshotRoots(roots) {
   if (!Array.isArray(roots) || roots.length === 0 || roots.length > 64) {
     throw new TypeError("local_file_root_invalid");
@@ -186,9 +240,13 @@ export function createRdcLocalFilesAdapter({
   rdc,
   roots,
   maxFileBytes = DEFAULT_MAX_FILE_BYTES,
+  maxLiveFileIds = DEFAULT_MAX_LIVE_FILE_IDS,
+  maxPendingCaptures = DEFAULT_MAX_PENDING_CAPTURES,
   idFactory = defaultIdFactory,
+  rawCapture = null,
 }) {
   requireRdc(rdc);
+  requireRawCapture(rawCapture);
   const rootsById = snapshotRoots(roots);
   if (
     !Number.isSafeInteger(maxFileBytes)
@@ -197,14 +255,53 @@ export function createRdcLocalFilesAdapter({
   ) {
     throw new TypeError("local_file_limit_invalid");
   }
+  if (
+    !Number.isSafeInteger(maxLiveFileIds)
+    || maxLiveFileIds < 1
+    || maxLiveFileIds > 65536
+  ) {
+    throw new TypeError("local_file_id_capacity_invalid");
+  }
+  if (
+    !Number.isSafeInteger(maxPendingCaptures)
+    || maxPendingCaptures < 1
+    || maxPendingCaptures > 32
+  ) {
+    throw new TypeError("local_file_capture_capacity_invalid");
+  }
   if (typeof idFactory !== "function") throw new TypeError("local_file_id_factory_invalid");
 
   const identityToId = new Map();
   const idToIdentity = new Map();
+  const pendingCaptures = new Map();
+
+  function touchIdentity(localFileId, identity) {
+    if (!identity) return null;
+    idToIdentity.delete(localFileId);
+    idToIdentity.set(localFileId, identity);
+    return identity;
+  }
+
+  function evictOldestIdentity() {
+    for (const [localFileId, identity] of idToIdentity) {
+      if (pendingCaptures.has(localFileId)) continue;
+      idToIdentity.delete(localFileId);
+      identityToId.delete(identity.identity_key);
+      return true;
+    }
+    return false;
+  }
 
   function allocateId(identity) {
     const existing = identityToId.get(identity.identity_key);
-    if (existing) return existing;
+    if (existing) {
+      touchIdentity(existing, idToIdentity.get(existing));
+      return existing;
+    }
+
+    while (idToIdentity.size >= maxLiveFileIds) {
+      if (!evictOldestIdentity()) throw safeError("local_file_capacity");
+    }
 
     const candidate = idFactory();
     if (typeof candidate !== "string" || !LOCAL_FILE_ID_RE.test(candidate)) {
@@ -220,11 +317,151 @@ export function createRdcLocalFilesAdapter({
     return candidate;
   }
 
-  function resolveLocalFile(localFileId) {
+  function resolveIdentity(localFileId) {
     if (typeof localFileId !== "string" || !LOCAL_FILE_ID_RE.test(localFileId)) return null;
-    const identity = idToIdentity.get(localFileId);
+    const identity = idToIdentity.get(localFileId) ?? null;
+    return identity ? touchIdentity(localFileId, identity) : null;
+  }
+
+  function resolveLocalFile(localFileId) {
+    const identity = resolveIdentity(localFileId);
     return identity ? structuredClone(identity) : null;
-  }  async function findLocalFiles(request) {
+  }
+
+  function getLocalFileImportBinding(localFileId) {
+    const identity = resolveIdentity(localFileId);
+    if (
+      !identity
+      || typeof identity.content_digest !== "string"
+      || !DIGEST_RE.test(identity.content_digest)
+    ) return null;
+    return Object.freeze({
+      size_bytes: identity.size_bytes,
+      modified_at: identity.modified_at,
+      content_digest: identity.content_digest,
+    });
+  }
+
+  async function captureForIdentity(identity, includeBytes) {
+    if (!rawCapture) throw safeError("local_file_source_failure");
+    const root = rootsById.get(identity.root_id);
+    if (!root) throw safeError("local_file_source_invalid");
+    let raw;
+    try {
+      raw = await rawCapture.captureFile({
+        canonical_path: identity.canonical_path,
+        root_path: root.canonical_path,
+        include_bytes: includeBytes,
+      });
+    } catch (error) {
+      if (
+        error?.code === "local_file_source_invalid"
+        || error?.code === "local_file_source_changed"
+      ) throw error;
+      throw safeError("local_file_source_failure");
+    }
+    const capture = trustedCaptureSnapshot(raw, { includeBytes });
+    if (
+      foldedWindowsPath(capture.canonical_path) !== foldedWindowsPath(identity.canonical_path)
+      || capture.size_bytes > maxFileBytes
+    ) {
+      throw safeError("local_file_source_invalid");
+    }
+    if (includeBytes) {
+      const bytes = Buffer.from(capture.bytes);
+      const digest = "sha256:" + crypto.createHash("sha256").update(bytes).digest("hex");
+      if (bytes.length !== capture.size_bytes || digest !== capture.content_digest) {
+        throw safeError("local_file_source_invalid");
+      }
+    }
+    return capture;
+  }
+
+  function metadataFromCapture(identity, capture) {
+    return Object.freeze({
+      source_identity: capture.source_identity,
+      relative_path: identity.relative_path,
+      size_bytes: capture.size_bytes,
+      modified_at: capture.modified_at,
+      extension: identity.extension,
+      is_file: true,
+      is_symlink: false,
+      is_reparse_point: false,
+    });
+  }
+
+  function captureWithoutBytes(capture) {
+    return Object.freeze({
+      canonical_path: capture.canonical_path,
+      source_identity: capture.source_identity,
+      size_bytes: capture.size_bytes,
+      modified_at: capture.modified_at,
+      content_digest: capture.content_digest,
+      hard_link_count: capture.hard_link_count,
+      is_file: capture.is_file,
+      is_symlink: capture.is_symlink,
+      is_reparse_point: capture.is_reparse_point,
+      bytes: null,
+    });
+  }
+
+  async function statLocalFile(localFileId) {
+    if (!rawCapture) throw safeError("local_file_source_failure");
+    const identity = resolveIdentity(localFileId);
+    if (
+      !identity
+      || typeof identity.source_identity !== "string"
+      || typeof identity.content_digest !== "string"
+    ) {
+      throw safeError("local_file_source_invalid");
+    }
+
+    const pending = pendingCaptures.get(localFileId);
+    if (pending) {
+      if (pending.stage === "after_read") {
+        pendingCaptures.delete(localFileId);
+        return metadataFromCapture(identity, pending.capture);
+      }
+      pendingCaptures.delete(localFileId);
+    }
+
+    const capture = await captureForIdentity(identity, true);
+    if (
+      capture.size_bytes !== identity.size_bytes
+      || capture.modified_at !== identity.modified_at
+    ) {
+      return metadataFromCapture(identity, capture);
+    }
+    if (
+      capture.source_identity !== identity.source_identity
+      || capture.content_digest !== identity.content_digest
+    ) {
+      throw safeError("local_file_source_changed");
+    }
+
+    if (pendingCaptures.size >= maxPendingCaptures) {
+      throw safeError("local_file_capacity");
+    }
+    pendingCaptures.set(localFileId, {
+      stage: "awaiting_read",
+      capture,
+    });
+    return metadataFromCapture(identity, capture);
+  }
+
+  async function readLocalFile(localFileId) {
+    if (!rawCapture) throw safeError("local_file_source_failure");
+    const pending = pendingCaptures.get(localFileId);
+    if (!pending || pending.stage !== "awaiting_read") {
+      throw safeError("local_file_source_invalid");
+    }
+    const bytes = Buffer.from(pending.capture.bytes);
+    pending.stage = "after_read";
+    pending.capture = captureWithoutBytes(pending.capture);
+    return bytes;
+  }
+
+  async function findLocalFiles(request) {
     if (!validDiscoveryRequest(request)) throw safeError("local_file_request_invalid");
     const root = rootsById.get(request.root_id);
     if (!root) throw safeError("local_file_root_unavailable");
@@ -283,9 +520,30 @@ export function createRdcLocalFilesAdapter({
           throw safeError("local_file_source_invalid");
         }
 
+        let trusted = null;
+        if (rawCapture) {
+          const provisionalIdentity = {
+            root_id: request.root_id,
+            canonical_path: source.canonical_path,
+          };
+          trusted = await captureForIdentity(provisionalIdentity, false);
+          if (
+            trusted.size_bytes !== source.size_bytes
+            || trusted.modified_at !== source.modified_at
+          ) {
+            throw safeError("local_file_source_invalid");
+          }
+        }
+
         const identityKey = request.root_id.toLowerCase()
           + "\0"
-          + foldedWindowsPath(source.canonical_path);
+          + foldedWindowsPath(source.canonical_path)
+          + (trusted
+            ? "\0" + trusted.source_identity
+              + "\0" + trusted.content_digest
+              + "\0" + trusted.size_bytes
+              + "\0" + trusted.modified_at
+            : "");
         if (stagedKeys.has(identityKey)) continue;
         stagedKeys.add(identityKey);
 
@@ -297,6 +555,8 @@ export function createRdcLocalFilesAdapter({
           size_bytes: source.size_bytes,
           extension,
           modified_at: source.modified_at,
+          source_identity: trusted?.source_identity ?? null,
+          content_digest: trusted?.content_digest ?? null,
         });
       }
 
@@ -339,6 +599,15 @@ export function createRdcLocalFilesAdapter({
     }
   }
 
+  if (rawCapture) {
+    return Object.freeze({
+      findLocalFiles,
+      resolveLocalFile,
+      getLocalFileImportBinding,
+      statLocalFile,
+      readLocalFile,
+    });
+  }
   return Object.freeze({
     findLocalFiles,
     resolveLocalFile,

@@ -72,6 +72,7 @@ test("executable registry exposes only the safe read/review static_web subset", 
     "website_build_check",
     "website_preview_get",
     "website_local_files_find",
+    "website_asset_import",
   ]);
   assert.equal(WEBSITE_TOOLSET_STATUS.executable_tools, true);
   assert.deepEqual(WEBSITE_TOOLSET_STATUS.executable_tool_names, [

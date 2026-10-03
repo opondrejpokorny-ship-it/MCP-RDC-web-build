@@ -51,6 +51,7 @@ export function createInProcessStaticBackendAdapter({
   workspace,
   validateWorkspace,
   startDevelopmentPreview,
+  assetLibrary = null,
 }) {
   requiredMethod(lifecycle, "getProject", "lifecycle");
   requiredMethod(workspace, "listFiles", "workspace");
@@ -61,8 +62,11 @@ export function createInProcessStaticBackendAdapter({
   if (typeof startDevelopmentPreview !== "function") {
     throw new TypeError("start_development_preview_required");
   }
+  if (assetLibrary !== null) {
+    requiredMethod(assetLibrary, "importLocalAsset", "asset_library");
+  }
 
-  return Object.freeze({
+  const adapter = {
     getProject(projectId) {
       return lifecycle.getProject(projectId);
     },
@@ -125,5 +129,9 @@ export function createInProcessStaticBackendAdapter({
         throw error;
       }
     },
-  });
+  };
+  if (assetLibrary !== null) {
+    adapter.importLocalAsset = (request) => assetLibrary.importLocalAsset(request);
+  }
+  return Object.freeze(adapter);
 }
