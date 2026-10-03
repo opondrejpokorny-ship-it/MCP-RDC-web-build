@@ -178,6 +178,29 @@ function assetImportIdempotencyKey(args) {
     + crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
+function trustedAssetImportBinding(raw, args) {
+  const binding = snapshotOwnDataFields(raw, [
+    "size_bytes",
+    "modified_at",
+    "content_digest",
+  ]);
+  if (
+    !binding
+    || !exactKeys(raw, ["size_bytes", "modified_at", "content_digest"])
+    || !Number.isSafeInteger(binding.size_bytes)
+    || binding.size_bytes < 0
+    || binding.size_bytes > MAX_ASSET_IMPORT_BYTES
+    || !strictIsoUtc(binding.modified_at)
+    || typeof binding.content_digest !== "string"
+    || !SHA256_RE.test(binding.content_digest)
+  ) return null;
+  if (
+    binding.size_bytes !== args.size_bytes
+    || binding.modified_at !== args.modified_at
+  ) return false;
+  return binding;
+}
+
 function expectedSourceHandleDigest(localFileId) {
   return "sha256:"
     + crypto.createHash("sha256")
@@ -628,6 +651,9 @@ export function createStaticWebsiteToolset({
     throw new TypeError("local_files_adapter_invalid");
   }
   const assetImportComposed = localFiles !== null
+    && typeof localFiles.getLocalFileImportBinding === "function"
+    && typeof localFiles.statLocalFile === "function"
+    && typeof localFiles.readLocalFile === "function"
     && typeof backend.importLocalAsset === "function";
   if (!Number.isInteger(previewTtlMs) || previewTtlMs < 1_000 || previewTtlMs > 3_600_000) {
     throw new TypeError("preview_ttl_invalid");
@@ -905,6 +931,12 @@ export function createStaticWebsiteToolset({
 
   async function assetImport(args) {
     if (!assetImportComposed) return fail("CAPABILITY_UNAVAILABLE");
+    const rawBinding = await localFiles.getLocalFileImportBinding(args.local_file_id);
+    if (rawBinding === null || rawBinding === undefined) return fail("LOCAL_FILE_STALE");
+    const binding = trustedAssetImportBinding(rawBinding, args);
+    if (binding === false) return fail("LOCAL_FILE_STALE");
+    if (binding === null) return fail("LOCAL_FILE_SOURCE_INVALID");
+
     const raw = await backend.importLocalAsset({
       project_id: args.project_id,
       local_file_id: args.local_file_id,
@@ -912,7 +944,7 @@ export function createStaticWebsiteToolset({
         size_bytes: args.size_bytes,
         modified_at: args.modified_at,
       },
-      expected_content_digest: null,
+      expected_content_digest: binding.content_digest,
       idempotency_key: assetImportIdempotencyKey(args),
     });
     return sanitizeAssetImportResult(raw, args) ?? fail("ASSET_RESPONSE_INVALID");
@@ -981,6 +1013,7 @@ export function createStaticWebsiteToolset({
         if (error?.code === "asset_project_unavailable") return fail("ASSET_PROJECT_UNAVAILABLE");
         if (error?.code === "asset_source_stale") return fail("LOCAL_FILE_STALE");
         if (error?.code === "asset_source_changed") return fail("LOCAL_FILE_CHANGED");
+        if (error?.code === "asset_content_digest_mismatch") return fail("LOCAL_FILE_CHANGED");
         if (error?.code === "asset_too_large") return fail("ASSET_TOO_LARGE");
         if (
           error?.code === "asset_type_unsupported"

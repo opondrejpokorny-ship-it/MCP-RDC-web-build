@@ -375,6 +375,8 @@ test("tool sanitizes provider exceptions", async () => {
     ROOT + "\\trail.\\file.jpg",
     ROOT + "\\trail \\file.jpg",
     ROOT + "\\CON.jpg",
+    ROOT + "\\CONIN$",
+    ROOT + "\\CONOUT$",
     ROOT + "\\COM¹.txt",
     ROOT + "\\LPT².png",
     ROOT + "\\LPT³.jpg",

@@ -1,5 +1,5 @@
 const WINDOWS_RESERVED_BASENAME_RE =
-  /^(?:con|prn|aux|nul|com(?:[1-9\u00b9\u00b2\u00b3])|lpt(?:[1-9\u00b9\u00b2\u00b3]))(?:\..*)?$/i;
+  /^(?:con|conin\$|conout\$|prn|aux|nul|com(?:[1-9\u00b9\u00b2\u00b3])|lpt(?:[1-9\u00b9\u00b2\u00b3]))(?:\..*)?$/i;
 
 export function isSafeWindowsLocalSegment(segment) {
   if (typeof segment !== "string" || segment.length === 0 || segment.length > 255) return false;

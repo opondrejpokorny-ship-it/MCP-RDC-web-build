@@ -61,10 +61,25 @@ function makeBackend({ importImpl } = {}) {
   return backend;
 }
 
-function localFiles() {
+function localFiles({ binding = {} } = {}) {
   return {
     async findLocalFiles() {
       return { root_id: "photos", files: [] };
+    },
+    getLocalFileImportBinding(localFileId) {
+      if (localFileId !== LOCAL_FILE_ID) return null;
+      return {
+        size_bytes: 1234,
+        modified_at: MODIFIED_AT,
+        content_digest: CONTENT_DIGEST,
+        ...binding,
+      };
+    },
+    async statLocalFile() {
+      throw new Error("not used by orchestration test");
+    },
+    async readLocalFile() {
+      throw new Error("not used by orchestration test");
     },
   };
 }
@@ -118,6 +133,16 @@ test("asset import is visible only with local discovery and backend Media Librar
     await noLocal.callTool("website_asset_import", args()),
     { ok: false, error_code: "CAPABILITY_UNAVAILABLE" },
   );
+
+  const discoveryOnly = createStaticWebsiteToolset({
+    backend: makeBackend({ importImpl: async () => validBackendResult() }),
+    localFiles: {
+      async findLocalFiles() {
+        return { root_id: "photos", files: [] };
+      },
+    },
+  });
+  assert.equal(discoveryOnly.tools.some((tool) => tool.name === "website_asset_import"), false);
 
   const composed = createStaticWebsiteToolset({
     backend: makeBackend({ importImpl: async () => validBackendResult() }),
@@ -190,18 +215,21 @@ test("asset import delegates exact opaque identity and freshness with stable int
       size_bytes: 1234,
       modified_at: MODIFIED_AT,
     },
-    expected_content_digest: null,
+    expected_content_digest: CONTENT_DIGEST,
     idempotency_key: firstRequest.idempotency_key,
   });
   assert.match(firstRequest.idempotency_key, /^website-asset-import:[a-f0-9]{64}$/);
   assert.equal(secondRequest.idempotency_key, firstRequest.idempotency_key);
   assert.equal(backend.calls.some(([name]) => name === "getProject"), false);
 
-  await toolset.callTool("website_asset_import", args({
+  const stale = await toolset.callTool("website_asset_import", args({
     modified_at: "2026-09-28T09:02:00.000Z",
   }));
-  const thirdRequest = backend.calls.filter(([name]) => name === "importLocalAsset")[2][1];
-  assert.notEqual(thirdRequest.idempotency_key, firstRequest.idempotency_key);
+  assert.deepEqual(stale, { ok: false, error_code: "LOCAL_FILE_STALE" });
+  assert.equal(
+    backend.calls.filter(([name]) => name === "importLocalAsset").length,
+    2,
+  );
 });
 
 test("asset import returns an exact bounded managed-asset projection", async () => {
@@ -263,6 +291,7 @@ test("asset import maps expected backend denials and sanitizes arbitrary failure
     ["asset_project_unavailable", "ASSET_PROJECT_UNAVAILABLE"],
     ["asset_source_stale", "LOCAL_FILE_STALE"],
     ["asset_source_changed", "LOCAL_FILE_CHANGED"],
+    ["asset_content_digest_mismatch", "LOCAL_FILE_CHANGED"],
     ["asset_too_large", "ASSET_TOO_LARGE"],
     ["asset_type_unsupported", "ASSET_TYPE_UNSUPPORTED"],
     ["asset_type_mismatch", "ASSET_TYPE_UNSUPPORTED"],

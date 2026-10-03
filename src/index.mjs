@@ -21,6 +21,9 @@ export {
 export {
   createRdcLocalFilesAdapter,
 } from "./adapters/rdc-local-files.mjs";
+export {
+  createWindowsStableFileCapture,
+} from "./adapters/windows-stable-file-capture.mjs";
 
 export const WEBSITE_TOOLSET_STATUS = Object.freeze({
   phase: "static_web_executable_read_review",

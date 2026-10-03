@@ -7,7 +7,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.mjs && node --check src/contracts/tool-names.mjs && node --check src/contracts/boundary.mjs && node --check src/contracts/request-envelope.mjs && node --check src/executable/static-tools.mjs && node --check src/adapters/in-process-static-backend.mjs && node --check src/adapters/rdc-local-files.mjs && node --check src/security/windows-local-path.mjs && node --check scripts/public-safety.mjs && node --check test/boundary.test.mjs && node --check test/executable-tools.test.mjs && node --check test/asset-import.test.mjs && node --check test/in-process-adapter.test.mjs && node --check test/local-files-find.test.mjs && node --check test/public-safety.test.mjs",
+    "check": "node --check src/index.mjs && node --check src/contracts/tool-names.mjs && node --check src/contracts/boundary.mjs && node --check src/contracts/request-envelope.mjs && node --check src/executable/static-tools.mjs && node --check src/adapters/in-process-static-backend.mjs && node --check src/adapters/rdc-local-files.mjs && node --check src/adapters/windows-stable-file-capture.mjs && node --check src/security/windows-local-path.mjs && node --check scripts/public-safety.mjs && node --check test/boundary.test.mjs && node --check test/executable-tools.test.mjs && node --check test/asset-import.test.mjs && node --check test/in-process-adapter.test.mjs && node --check test/local-files-find.test.mjs && node --check test/raw-byte-bridge.test.mjs && node --check test/windows-stable-file-capture.test.mjs && node --check test/cross-repo-asset-import-e2e.test.mjs && node --check test/public-safety.test.mjs",
     "public-safety": "node scripts/public-safety.mjs"
   }
 }
