@@ -26,14 +26,26 @@ export {
 } from "./adapters/windows-stable-file-capture.mjs";
 
 export const WEBSITE_TOOLSET_STATUS = Object.freeze({
-  phase: "static_web_executable_read_review",
+  phase: "static_web_mutation_integration",
   supported_project_types: Object.freeze(["static_web"]),
   executable_tools: true,
   executable_tool_names: Object.freeze([
     "website_project_status",
     "website_project_inspect",
+    "website_change_prepare",
+    "website_change_apply",
     "website_build_check",
+    "website_change_reject",
+    "website_change_accept",
     "website_preview_get",
+    "website_local_files_find",
+    "website_asset_import",
   ]),
+  trusted_host_required_tool_names: Object.freeze([
+    "website_change_reject",
+    "website_change_accept",
+  ]),
+  review_decision_product_composed: false,
+  release_tools_enabled: false,
   stock_rdc_modified: false,
 });

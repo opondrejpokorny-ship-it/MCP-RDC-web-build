@@ -30,24 +30,31 @@ This initial public repository is clean-room bootstrap code only. No private his
 
 ## Current status
 
-The Phase 1 contract remains `static_web` only. The default core composition exposes a deliberately narrow read/review subset:
+The Phase 1 contract remains `static_web` only. The executable implementation now contains the read/review, local-asset and prepared-change mutation tools:
 
 - `website_project_status`
 - `website_project_inspect`
+- `website_change_prepare`
+- `website_change_apply`
 - `website_build_check`
 - `website_preview_get`
+- `website_local_files_find`
+- `website_asset_import`
+- conditional `website_change_accept` / `website_change_reject`
 
-An optional trusted local-files composition also exposes `website_local_files_find`. It accepts only an opaque pre-authorized `root_id` plus bounded search filters and returns opaque `local_file_id` metadata; absolute paths and file contents stay inside trusted composition.
+Capabilities are advertised only when their trusted dependencies are actually composed. Local discovery/import requires the trusted local-files bridge. Prepare/apply requires the backend prepared-change authority. Accept/reject additionally requires an injected trusted host `approvals.resolveApproval(...)` resolver and is hidden when that resolver is absent.
 
-This feature branch adds the trusted `website_asset_import` vertical. The tool is advertised only when the local-files adapter exposes the private import binding plus `statLocalFile` / `readLocalFile`, and the backend exposes Media Library `importLocalAsset` authority. Its model-facing request remains closed to `project_id + local_file_id + size_bytes + modified_at`; the model cannot provide an absolute path, bytes, caller/approval authority, content digest or idempotency key. The discovery-time content digest and deterministic retry identity are derived inside trusted composition, and the result is re-projected to bounded managed-asset metadata with project/source/size binding.
+The current repository does **not** contain the Owned MCP product composition or a human-approval minting surface. Therefore `website_change_accept` and `website_change_reject` are implemented and tested orchestration paths, but they are **not claimed as production-ready product runtime capabilities yet**. The model can provide only an opaque `approval_id`; raw authorization evidence, caller class and idempotency authority are derived/resolved inside trusted composition. Product composition must inject the resolver from outside the ordinary model-facing tool surface and preserve one-time, expiring, exact-action binding.
 
-The authoritative backend Media Library cross-instance state/idempotency blocker is closed, and this branch now supplies the remaining local raw-byte bridge. `createWindowsStableFileCapture` requires an injected trusted path validator such as stock Desktop Commander `validatePath()`, rechecks exact configured-root containment, rejects unsafe Windows path/device/reparse/hard-link cases, binds opened-file identity and final path, and captures bounded bytes while a Windows `FileShare.Read` handle denies concurrent write/delete sharing. Discovery privately pins Win32 source identity plus SHA-256; same-size/same-mtime replacement and same-object content ABA fail closed. Raw bytes and absolute paths never enter the model-facing tool result. Stock `read_file` remains presentation-oriented and is not used as the generic binary provider.
+`website_asset_import` is advertised only when the local-files adapter exposes the private import binding plus `statLocalFile` / `readLocalFile`, and the backend exposes Media Library `importLocalAsset` authority. Its model-facing request remains closed to `project_id + local_file_id + size_bytes + modified_at`; the model cannot provide an absolute path, bytes, caller/approval authority, content digest or idempotency key. `createWindowsStableFileCapture` requires an injected trusted path validator such as stock Desktop Commander `validatePath()`, rechecks configured-root containment and rejects unsafe Windows path/device/reparse/hard-link cases. Raw bytes and absolute paths never enter model-facing results.
 
-Build/preview still use the fixed backend adapter boundary, closed schemas, bounded output projection and loopback-only Development Preview verification. Build and preview are bound to the exact server-issued operation incarnation `project_id + operation_id + operation_revision + workspace_digest`; the in-process adapter rechecks that fence before and after awaited backend work. Asset import does not add workspace, acceptance, release or publication authority.
+Prepare accepts only bounded relative write/delete operations plus project and expected workspace digest. The backend returns an opaque prepared-change identity. Apply accepts only project plus that opaque ID, then re-reads authoritative project state and re-gates exact operation ID, immutable operation revision and target workspace digest. Accept/reject are exact review decisions only; neither path prepares or activates a release.
 
-Accept, Reject, Release Prepare, Release Activate, published-preview control and customer publication remain outside this executable slice. Preview != Accept != Release Prepare != Release Activate, and no asset-import path creates a silent publish shortcut.
+Build/preview continue to use the fixed backend adapter boundary, closed schemas, bounded output projection and loopback-only Development Preview verification. Build and preview remain bound to the exact server-issued operation incarnation `project_id + operation_id + operation_revision + workspace_digest`.
 
-The current local Cube reconstruction passes 118/118 tests plus syntax, public-safety, dependency-audit and diff gates. Real Windows tests cover exact byte/digest capture, hard-link and junction rejection, restored-metadata replacement, content ABA, oversized/device forms and concurrent write/rename denial. A cross-repository E2E against the current backend imports original PNG and PDF bytes into the managed Media Library, verifies exact readback, deterministic replay and stale-source denial; the E2E also passed five consecutive canary runs. Stock Desktop Commander `validatePath()` was smoke-tested against the existing allowed-directory configuration without changing that configuration. Commit/PR/CI evidence is maintained in the project Work Log and Active Work Registry. Owned MCP product composition and deployment remain separate future gates.
+Release Prepare, Release Activate, published-preview control and customer publication remain unavailable in this slice. **Preview != Accept != Release Prepare != Release Activate.** No mutation or asset path creates a silent publish shortcut.
+
+Current verification and integration evidence is maintained in the project Work Log and Active Work Registry. Cross-repository asset-import and mutation E2E run against an explicitly selected backend checkout. Owned MCP product composition and deployment remain separate gates.
 
 `"private": true` in `package.json` prevents accidental npm publication; it does not make this Git repository private.
 

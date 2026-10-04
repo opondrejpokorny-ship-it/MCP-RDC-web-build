@@ -14,15 +14,27 @@ test("website tool names are unique", () => {
   assert.equal(new Set(WEBSITE_TOOL_NAMES).size, WEBSITE_TOOL_NAMES.length);
 });
 
-test("phase 1 exposes static_web only with a bounded executable subset", () => {
+test("phase 1 status reports implemented mutation tools without claiming product approval composition", () => {
   assert.deepEqual(WEBSITE_TOOLSET_STATUS.supported_project_types, ["static_web"]);
   assert.equal(WEBSITE_TOOLSET_STATUS.executable_tools, true);
   assert.deepEqual(WEBSITE_TOOLSET_STATUS.executable_tool_names, [
     "website_project_status",
     "website_project_inspect",
+    "website_change_prepare",
+    "website_change_apply",
     "website_build_check",
+    "website_change_reject",
+    "website_change_accept",
     "website_preview_get",
+    "website_local_files_find",
+    "website_asset_import",
   ]);
+  assert.deepEqual(WEBSITE_TOOLSET_STATUS.trusted_host_required_tool_names, [
+    "website_change_reject",
+    "website_change_accept",
+  ]);
+  assert.equal(WEBSITE_TOOLSET_STATUS.review_decision_product_composed, false);
+  assert.equal(WEBSITE_TOOLSET_STATUS.release_tools_enabled, false);
 });
 
 test("accept, release prepare, and release activate remain distinct", () => {
@@ -49,6 +61,7 @@ test("future mutation envelope requires exact non-empty identity shape", () => {
   assert.deepEqual(MUTATION_ENVELOPE_FIELDS, [
     "project_id",
     "operation_id",
+    "operation_revision",
     "expected_workspace_digest",
     "idempotency_key",
     "caller_class",
@@ -57,15 +70,17 @@ test("future mutation envelope requires exact non-empty identity shape", () => {
   const complete = {
     project_id: "project-static-1",
     operation_id: "operation-1",
+    operation_revision: "1",
     expected_workspace_digest: "a".repeat(64),
     idempotency_key: "idem-12345678",
     caller_class: "model_orchestrator",
     authorization_evidence: {
       authorization_id: "approval-1",
       decision: "approved",
-      transition: "website_change_accept",
+      transition: "accept",
       project_id: "project-static-1",
       operation_id: "operation-1",
+      operation_revision: "1",
       expected_workspace_digest: "a".repeat(64),
       idempotency_key: "idem-12345678",
       caller_class: "model_orchestrator",

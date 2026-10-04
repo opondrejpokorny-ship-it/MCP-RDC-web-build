@@ -52,6 +52,7 @@ export function createInProcessStaticBackendAdapter({
   validateWorkspace,
   startDevelopmentPreview,
   assetLibrary = null,
+  changeAuthority = null,
 }) {
   requiredMethod(lifecycle, "getProject", "lifecycle");
   requiredMethod(workspace, "listFiles", "workspace");
@@ -64,6 +65,11 @@ export function createInProcessStaticBackendAdapter({
   }
   if (assetLibrary !== null) {
     requiredMethod(assetLibrary, "importLocalAsset", "asset_library");
+  }
+  if (changeAuthority !== null) {
+    requiredMethod(changeAuthority, "prepareChange", "change_authority");
+    requiredMethod(changeAuthority, "applyPreparedChange", "change_authority");
+    requiredMethod(lifecycle, "executeHumanTransition", "lifecycle");
   }
 
   const adapter = {
@@ -132,6 +138,18 @@ export function createInProcessStaticBackendAdapter({
   };
   if (assetLibrary !== null) {
     adapter.importLocalAsset = (request) => assetLibrary.importLocalAsset(request);
+  }
+  if (changeAuthority !== null) {
+    adapter.prepareChange = (request) => changeAuthority.prepareChange(request);
+    adapter.applyPreparedChange = (request) => changeAuthority.applyPreparedChange(request);
+    adapter.acceptChange = (request) => lifecycle.executeHumanTransition({
+      transition: "accept",
+      request,
+    });
+    adapter.rejectChange = (request) => lifecycle.executeHumanTransition({
+      transition: "reject",
+      request,
+    });
   }
   return Object.freeze(adapter);
 }

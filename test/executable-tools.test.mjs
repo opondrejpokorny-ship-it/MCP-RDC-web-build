@@ -69,18 +69,23 @@ function makeBackend(overrides = {}) {
 test("executable registry exposes only the safe read/review static_web subset", () => {
   assert.deepEqual(EXECUTABLE_WEBSITE_TOOL_NAMES, [    "website_project_status",
     "website_project_inspect",
+    "website_change_prepare",
+    "website_change_apply",
     "website_build_check",
+    "website_change_reject",
+    "website_change_accept",
     "website_preview_get",
     "website_local_files_find",
     "website_asset_import",
   ]);
   assert.equal(WEBSITE_TOOLSET_STATUS.executable_tools, true);
-  assert.deepEqual(WEBSITE_TOOLSET_STATUS.executable_tool_names, [
-    "website_project_status",
-    "website_project_inspect",
-    "website_build_check",
-    "website_preview_get",
+  assert.deepEqual(WEBSITE_TOOLSET_STATUS.executable_tool_names, EXECUTABLE_WEBSITE_TOOL_NAMES);
+  assert.deepEqual(WEBSITE_TOOLSET_STATUS.trusted_host_required_tool_names, [
+    "website_change_reject",
+    "website_change_accept",
   ]);
+  assert.equal(WEBSITE_TOOLSET_STATUS.review_decision_product_composed, false);
+  assert.equal(WEBSITE_TOOLSET_STATUS.release_tools_enabled, false);
   assert.ok(EXECUTABLE_WEBSITE_TOOL_NAMES.includes("website_local_files_find"));
 });
 
