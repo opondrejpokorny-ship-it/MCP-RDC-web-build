@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { WEBSITE_TOOL_NAMES } from "../contracts/tool-names.mjs";
+import { hasMutationEnvelopeShape } from "../contracts/request-envelope.mjs";
 import {
   isSafeWindowsLocalSegment,
   isSafeWindowsRelativePath,
@@ -8,7 +9,11 @@ import {
 export const EXECUTABLE_WEBSITE_TOOL_NAMES = Object.freeze([
   "website_project_status",
   "website_project_inspect",
+  "website_change_prepare",
+  "website_change_apply",
   "website_build_check",
+  "website_change_reject",
+  "website_change_accept",
   "website_preview_get",
   "website_local_files_find",
   "website_asset_import",
@@ -24,8 +29,12 @@ const CODE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const ROOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const LOCAL_FILE_ID_RE = /^localfile-[A-Za-z0-9_-]{32,128}$/;
 const ASSET_ID_RE = /^asset-[A-Za-z0-9_-]{32,128}$/;
+const PREPARED_CHANGE_ID_RE = /^change-[A-Za-z0-9_-]{32,128}$/;
+const APPROVAL_REF_RE = /^approvalref-[A-Za-z0-9_-]{32,128}$/;
 const SHA256_RE = /^sha256:[a-f0-9]{64}$/;
 const MAX_ASSET_IMPORT_BYTES = 1024 * 1024 * 1024;
+const MAX_CHANGE_OPERATIONS = 64;
+const MAX_CHANGE_PLAN_BYTES = 1024 * 1024;
 const ASSET_MIME_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -128,6 +137,100 @@ function validateOperationBoundRequest(args) {
     && validDigest(args.expected_workspace_digest);
 }
 
+function snapshotChangeOperations(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_CHANGE_OPERATIONS) return null;
+  const operations = [];
+  let totalBytes = 0;
+  for (const operation of value) {
+    if (!isPlainObject(operation)) return null;
+    const typeDescriptor = Object.getOwnPropertyDescriptor(operation, "type");
+    if (
+      !typeDescriptor
+      || typeDescriptor.enumerable !== true
+      || !Object.hasOwn(typeDescriptor, "value")
+    ) return null;
+    const type = typeDescriptor.value;
+    if (type === "write") {
+      if (!exactKeys(operation, ["type", "path", "content"])) return null;
+      const snapshot = snapshotOwnDataFields(operation, ["type", "path", "content"]);
+      if (
+        !snapshot
+        || snapshot.type !== "write"
+        || !validWorkspacePath(snapshot.path)
+        || typeof snapshot.content !== "string"
+      ) return null;
+      totalBytes += Buffer.byteLength(snapshot.path, "utf8")
+        + Buffer.byteLength(snapshot.content, "utf8");
+      if (totalBytes > MAX_CHANGE_PLAN_BYTES) return null;
+      operations.push(Object.freeze({
+        type: "write",
+        path: snapshot.path,
+        content: snapshot.content,
+      }));
+      continue;
+    }
+    if (type === "delete") {
+      if (!exactKeys(operation, ["type", "path"])) return null;
+      const snapshot = snapshotOwnDataFields(operation, ["type", "path"]);
+      if (!snapshot || snapshot.type !== "delete" || !validWorkspacePath(snapshot.path)) return null;
+      totalBytes += Buffer.byteLength(snapshot.path, "utf8");
+      if (totalBytes > MAX_CHANGE_PLAN_BYTES) return null;
+      operations.push(Object.freeze({
+        type: "delete",
+        path: snapshot.path,
+      }));
+      continue;
+    }
+    return null;
+  }
+  return Object.freeze(operations);
+}
+
+function validateChangePrepareRequest(args) {
+  if (!exactKeys(args, ["project_id", "expected_workspace_digest", "operations"])) return false;
+  const snapshot = snapshotOwnDataFields(args, [
+    "project_id",
+    "expected_workspace_digest",
+    "operations",
+  ]);
+  return !!snapshot
+    && validProjectId(snapshot.project_id)
+    && validDigest(snapshot.expected_workspace_digest)
+    && snapshotChangeOperations(snapshot.operations) !== null;
+}
+
+function validateChangeApplyRequest(args) {
+  if (!exactKeys(args, ["project_id", "prepared_change_id"])) return false;
+  const snapshot = snapshotOwnDataFields(args, ["project_id", "prepared_change_id"]);
+  return !!snapshot
+    && validProjectId(snapshot.project_id)
+    && typeof snapshot.prepared_change_id === "string"
+    && PREPARED_CHANGE_ID_RE.test(snapshot.prepared_change_id);
+}
+
+function validateReviewDecisionRequest(args) {
+  if (!exactKeys(args, [
+    "project_id",
+    "operation_id",
+    "operation_revision",
+    "expected_workspace_digest",
+    "approval_id",
+  ])) return false;
+  const snapshot = snapshotOwnDataFields(args, [
+    "project_id",
+    "operation_id",
+    "operation_revision",
+    "expected_workspace_digest",
+    "approval_id",
+  ]);
+  return !!snapshot
+    && validProjectId(snapshot.project_id)
+    && validOperationId(snapshot.operation_id)
+    && validOperationRevision(snapshot.operation_revision)
+    && validDigest(snapshot.expected_workspace_digest)
+    && typeof snapshot.approval_id === "string"
+    && APPROVAL_REF_RE.test(snapshot.approval_id);
+}
 function validateLocalFilesRequest(args) {
   if (!exactKeys(args, ["root_id", "query", "extensions", "max_results"])) return false;
   if (typeof args.root_id !== "string" || !ROOT_ID_RE.test(args.root_id)) return false;
@@ -178,6 +281,35 @@ function assetImportIdempotencyKey(args) {
     + crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
+function canonicalChangePrepareRequest(args) {
+  const operations = snapshotChangeOperations(args.operations);
+  if (!operations) return null;
+  return Object.freeze({
+    project_id: args.project_id,
+    expected_workspace_digest: args.expected_workspace_digest,
+    operations,
+  });
+}
+
+function changePrepareIdempotencyKey(args) {
+  const canonical = canonicalChangePrepareRequest(args);
+  if (!canonical) return null;
+  return "website-change-prepare:"
+    + crypto.createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+}
+
+function reviewDecisionIdempotencyKey(toolName, args) {
+  const canonical = JSON.stringify({
+    tool_name: toolName,
+    approval_id: args.approval_id,
+    project_id: args.project_id,
+    operation_id: args.operation_id,
+    operation_revision: args.operation_revision,
+    expected_workspace_digest: args.expected_workspace_digest,
+  });
+  return toolName.replaceAll("_", "-") + ":"
+    + crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+}
 function trustedAssetImportBinding(raw, args) {
   const binding = snapshotOwnDataFields(raw, [
     "size_bytes",
@@ -288,6 +420,51 @@ function closedSchema(properties, required) {
   });
 }
 
+const PREPARED_CHANGE_ID_SCHEMA = Object.freeze({
+  type: "string",
+  pattern: "^change-[A-Za-z0-9_-]{32,128}$",
+});
+
+const APPROVAL_REF_SCHEMA = Object.freeze({
+  type: "string",
+  pattern: "^approvalref-[A-Za-z0-9_-]{32,128}$",
+});
+
+const CHANGE_PATH_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 1024,
+});
+
+const CHANGE_OPERATION_SCHEMA = Object.freeze({
+  oneOf: Object.freeze([
+    closedSchema(
+      {
+        type: Object.freeze({ const: "write" }),
+        path: CHANGE_PATH_SCHEMA,
+        content: Object.freeze({
+          type: "string",
+          maxLength: MAX_CHANGE_PLAN_BYTES,
+        }),
+      },
+      ["type", "path", "content"],
+    ),
+    closedSchema(
+      {
+        type: Object.freeze({ const: "delete" }),
+        path: CHANGE_PATH_SCHEMA,
+      },
+      ["type", "path"],
+    ),
+  ]),
+});
+
+const CHANGE_OPERATIONS_SCHEMA = Object.freeze({
+  type: "array",
+  minItems: 1,
+  maxItems: MAX_CHANGE_OPERATIONS,
+  items: CHANGE_OPERATION_SCHEMA,
+});
 const TOOL_DEFINITIONS = Object.freeze([
   Object.freeze({
     name: "website_project_status",
@@ -309,6 +486,28 @@ const TOOL_DEFINITIONS = Object.freeze([
     ),
   }),
   Object.freeze({
+    name: "website_change_prepare",
+    description: "Prepare an exact bounded static_web change transaction without mutating the workspace.",
+    inputSchema: closedSchema(
+      {
+        project_id: PROJECT_ID_SCHEMA,
+        expected_workspace_digest: DIGEST_SCHEMA,
+        operations: CHANGE_OPERATIONS_SCHEMA,
+      },
+      ["project_id", "expected_workspace_digest", "operations"],
+    ),
+  }),
+  Object.freeze({
+    name: "website_change_apply",
+    description: "Apply one exact backend-prepared static_web change and enter human review.",
+    inputSchema: closedSchema(
+      {
+        project_id: PROJECT_ID_SCHEMA,
+        prepared_change_id: PREPARED_CHANGE_ID_SCHEMA,
+      },
+      ["project_id", "prepared_change_id"],
+    ),
+  }),  Object.freeze({
     name: "website_build_check",
     description: "Validate the exact active static_web change without returning source or raw logs.",
     inputSchema: closedSchema(
@@ -322,6 +521,33 @@ const TOOL_DEFINITIONS = Object.freeze([
     ),
   }),
   Object.freeze({
+    name: "website_change_reject",
+    description: "Reject the exact active reviewed change using a separately issued opaque human approval reference.",
+    inputSchema: closedSchema(
+      {
+        project_id: PROJECT_ID_SCHEMA,
+        operation_id: OPERATION_ID_SCHEMA,
+        operation_revision: OPERATION_REVISION_SCHEMA,
+        expected_workspace_digest: DIGEST_SCHEMA,
+        approval_id: APPROVAL_REF_SCHEMA,
+      },
+      ["project_id", "operation_id", "operation_revision", "expected_workspace_digest", "approval_id"],
+    ),
+  }),
+  Object.freeze({
+    name: "website_change_accept",
+    description: "Accept the exact active reviewed change using a separately issued opaque human approval reference. Acceptance never publishes.",
+    inputSchema: closedSchema(
+      {
+        project_id: PROJECT_ID_SCHEMA,
+        operation_id: OPERATION_ID_SCHEMA,
+        operation_revision: OPERATION_REVISION_SCHEMA,
+        expected_workspace_digest: DIGEST_SCHEMA,
+        approval_id: APPROVAL_REF_SCHEMA,
+      },
+      ["project_id", "operation_id", "operation_revision", "expected_workspace_digest", "approval_id"],
+    ),
+  }),  Object.freeze({
     name: "website_preview_get",
     description: "Start or return an identity-bound loopback Development Preview for the exact review state.",
     inputSchema: closedSchema(
@@ -581,6 +807,154 @@ function sanitizeAssetImportResult(result, args) {
   });
 }
 
+function sanitizePreparedChangeResult(result, args, { requiredState = null } = {}) {
+  const change = snapshotOwnDataFields(result, [
+    "ok",
+    "state",
+    "project_id",
+    "prepared_change_id",
+    "operation_id",
+    "operation_revision",
+    "baseline_workspace_digest",
+    "target_workspace_digest",
+    "plan_digest",
+  ]);
+  if (
+    !change
+    || change.ok !== true
+    || !["prepared", "applied"].includes(change.state)
+    || (requiredState !== null && change.state !== requiredState)
+    || change.project_id !== args.project_id
+    || typeof change.prepared_change_id !== "string"
+    || !PREPARED_CHANGE_ID_RE.test(change.prepared_change_id)
+    || typeof change.operation_id !== "string"
+    || !validOperationId(change.operation_id)
+    || !validDigest(change.baseline_workspace_digest)
+    || !validDigest(change.target_workspace_digest)
+    || change.baseline_workspace_digest === change.target_workspace_digest
+    || !validDigest(change.plan_digest)
+  ) return null;
+  if (
+    Object.hasOwn(args, "expected_workspace_digest")
+    && change.baseline_workspace_digest !== args.expected_workspace_digest
+  ) return null;
+  if (
+    Object.hasOwn(args, "prepared_change_id")
+    && change.prepared_change_id !== args.prepared_change_id
+  ) return null;
+
+  if (change.state === "prepared") {
+    if (change.operation_revision !== null) return null;
+  } else if (!validOperationRevision(change.operation_revision)) {
+    return null;
+  }
+
+  const projected = {
+    prepared_change_id: change.prepared_change_id,
+    operation_id: change.operation_id,
+    operation_revision: change.operation_revision,
+    baseline_workspace_digest: change.baseline_workspace_digest,
+    target_workspace_digest: change.target_workspace_digest,
+    plan_digest: change.plan_digest,
+  };
+  if (change.state === "applied") {
+    const workspaceDescriptor = Object.getOwnPropertyDescriptor(result, "workspace_digest");
+    if (
+      !workspaceDescriptor
+      || workspaceDescriptor.enumerable !== true
+      || !Object.hasOwn(workspaceDescriptor, "value")
+      || workspaceDescriptor.value !== change.target_workspace_digest
+    ) return null;
+    projected.workspace_digest = workspaceDescriptor.value;
+  }
+  return Object.freeze(projected);
+}
+
+function sanitizeHumanTransitionResult(result, args, {
+  backendTransition,
+  authorizationId,
+}) {
+  const envelope = snapshotOwnDataFields(result, [
+    "ok",
+    "transition",
+    "authorization_id",
+    "state",
+  ]);
+  if (
+    !envelope
+    || envelope.ok !== true
+    || envelope.transition !== backendTransition
+    || envelope.authorization_id !== authorizationId
+  ) return null;
+  const projected = projectProjection(envelope.state);
+  if (!projected || projected.project_id !== args.project_id) return null;
+
+  if (backendTransition === "accept") {
+    if (
+      projected.workflow_state !== "accepted"
+      || projected.current_workspace_digest !== args.expected_workspace_digest
+      || projected.accepted_workspace_digest !== args.expected_workspace_digest
+      || projected.accepted_snapshot_id === null
+      || projected.active_operation_id !== args.operation_id
+      || projected.active_operation_revision !== args.operation_revision
+      || projected.operation_identity_status !== "bound"
+    ) return null;
+  } else if (backendTransition === "reject") {
+    if (
+      projected.workflow_state !== "working"
+      || projected.active_operation_id !== null
+      || projected.active_operation_revision !== null
+      || projected.operation_identity_status !== "none"
+      || projected.accepted_workspace_digest === null
+      || projected.current_workspace_digest !== projected.accepted_workspace_digest
+    ) return null;
+  } else {
+    return null;
+  }
+  return projected;
+}
+
+function sameProjectedProject(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mapPreparedChangeDenial(raw) {
+  if (!isPlainObject(raw) || raw.ok !== false || typeof raw.error_code !== "string") return null;
+  const mapped = new Map([
+    ["change_request_invalid", "REQUEST_INVALID"],
+    ["change_plan_invalid", "CHANGE_PLAN_INVALID"],
+    ["change_project_not_found", "PROJECT_NOT_FOUND"],
+    ["change_state_invalid", "CHANGE_STATE_INVALID"],
+    ["change_workspace_stale", "STALE_WORKSPACE"],
+    ["change_operation_conflict", "ACTIVE_CHANGE_MISMATCH"],
+    ["change_active", "ACTIVE_CHANGE_MISMATCH"],
+    ["change_noop", "CHANGE_NOOP"],
+    ["change_idempotency_conflict", "CHANGE_IDEMPOTENCY_CONFLICT"],
+    ["change_capacity", "CHANGE_CAPACITY"],
+    ["change_id_collision", "CHANGE_ID_COLLISION"],
+    ["prepared_change_not_found", "PREPARED_CHANGE_NOT_FOUND"],
+    ["change_target_mismatch", "CHANGE_TARGET_MISMATCH"],
+    ["change_record_conflict", "CHANGE_RECORD_CONFLICT"],
+  ]);
+  return mapped.has(raw.error_code) ? fail(mapped.get(raw.error_code)) : fail("CHANGE_DENIED");
+}
+
+function mapHumanTransitionDenial(raw) {
+  if (!isPlainObject(raw) || raw.ok !== false || typeof raw.error_code !== "string") return null;
+  const code = raw.error_code;
+  if (code.startsWith("authorization_")) return fail("APPROVAL_REJECTED");
+  if (code === "idempotency_conflict") return fail("CHANGE_IDEMPOTENCY_CONFLICT");
+  if (code === "workspace_digest_mismatch" || code === "workspace_digest_drift") {
+    return fail("STALE_WORKSPACE");
+  }
+  if (code === "operation_mismatch") return fail("ACTIVE_CHANGE_MISMATCH");
+  if (code === "operation_revision_mismatch") return fail("ACTIVE_OPERATION_REVISION_MISMATCH");
+  if (code === "operation_revision_unavailable" || code === "operation_revision_state_invalid") {
+    return fail("OPERATION_IDENTITY_UNAVAILABLE");
+  }
+  if (code === "transition_not_allowed") return fail("REVIEW_STATE_REQUIRED");
+  return fail("CHANGE_TRANSITION_DENIED");
+}
 function validLoopbackPreview(preview, args) {
   if (!isPlainObject(preview)) return false;
   if (!validOperationId(preview.preview_id)) return false;
@@ -630,6 +1004,7 @@ function requireBackend(backend) {
 export function createStaticWebsiteToolset({
   backend,
   localFiles = null,
+  approvals = null,
   previewTtlMs = 300_000,
   maxCachedPreviews = 8,
   scheduler = {
@@ -650,11 +1025,23 @@ export function createStaticWebsiteToolset({
   ) {
     throw new TypeError("local_files_adapter_invalid");
   }
+  if (
+    approvals !== null
+    && (!isPlainObject(approvals) || typeof approvals.resolveApproval !== "function")
+  ) {
+    throw new TypeError("approval_resolver_invalid");
+  }
   const assetImportComposed = localFiles !== null
     && typeof localFiles.getLocalFileImportBinding === "function"
     && typeof localFiles.statLocalFile === "function"
     && typeof localFiles.readLocalFile === "function"
     && typeof backend.importLocalAsset === "function";
+  const mutationComposed = typeof backend.prepareChange === "function"
+    && typeof backend.applyPreparedChange === "function";
+  const reviewDecisionComposed = mutationComposed
+    && approvals !== null
+    && typeof backend.acceptChange === "function"
+    && typeof backend.rejectChange === "function";
   if (!Number.isInteger(previewTtlMs) || previewTtlMs < 1_000 || previewTtlMs > 3_600_000) {
     throw new TypeError("preview_ttl_invalid");
   }
@@ -950,10 +1337,156 @@ export function createStaticWebsiteToolset({
     return sanitizeAssetImportResult(raw, args) ?? fail("ASSET_RESPONSE_INVALID");
   }
 
+  async function changePrepare(args) {
+    if (!mutationComposed) return fail("CAPABILITY_UNAVAILABLE");
+    const bound = await getBoundProject(args.project_id);
+    if (bound.error) return bound.error;
+    if (bound.project.current_workspace_digest !== args.expected_workspace_digest) {
+      return fail("STALE_WORKSPACE");
+    }
+    const canonical = canonicalChangePrepareRequest(args);
+    const idempotencyKey = changePrepareIdempotencyKey(args);
+    if (!canonical || !idempotencyKey) return fail("REQUEST_INVALID");
+
+    const raw = await backend.prepareChange({
+      project_id: canonical.project_id,
+      expected_workspace_digest: canonical.expected_workspace_digest,
+      operations: canonical.operations.map((operation) => Object.freeze({ ...operation })),
+      idempotency_key: idempotencyKey,
+    });
+    if (isPlainObject(raw) && raw.ok === false) {
+      return mapPreparedChangeDenial(raw) ?? fail("CHANGE_DENIED");
+    }
+    const change = sanitizePreparedChangeResult(raw, args, {
+      requiredState: "prepared",
+    });
+    if (!change) return fail("CHANGE_RESPONSE_INVALID");
+    return Object.freeze({ ok: true, change });
+  }
+
+  async function changeApply(args) {
+    if (!mutationComposed) return fail("CAPABILITY_UNAVAILABLE");
+    const raw = await backend.applyPreparedChange({
+      project_id: args.project_id,
+      prepared_change_id: args.prepared_change_id,
+    });
+    if (isPlainObject(raw) && raw.ok === false) {
+      return mapPreparedChangeDenial(raw) ?? fail("CHANGE_DENIED");
+    }
+    const change = sanitizePreparedChangeResult(raw, args, {
+      requiredState: "applied",
+    });
+    if (!change) return fail("CHANGE_RESPONSE_INVALID");
+
+    const bound = await getBoundProject(args.project_id);
+    if (bound.error) return bound.error;
+    const gate = stateGate(bound.project, {
+      project_id: args.project_id,
+      operation_id: change.operation_id,
+      operation_revision: change.operation_revision,
+      expected_workspace_digest: change.workspace_digest,
+    }, { reviewRequired: true });
+    if (gate) {
+      if (gate.error_code === "REVIEW_STATE_REQUIRED") {
+        return fail("CHANGE_REVIEW_STATE_INVALID");
+      }
+      return gate;
+    }
+    const projected = projectProjection(bound.project);
+    if (!projected) return fail("BACKEND_RESPONSE_INVALID");
+    return Object.freeze({
+      ok: true,
+      change,
+      project: projected,
+    });
+  }
+
+  async function reviewDecision(toolName, backendTransition, args) {
+    if (!reviewDecisionComposed) return fail("CAPABILITY_UNAVAILABLE");
+    const bound = await getBoundProject(args.project_id);
+    if (bound.error) return bound.error;
+    if (bound.project.workflow_state === "review_required") {
+      const gate = stateGate(bound.project, args, { reviewRequired: true });
+      if (gate) return gate;
+    }
+
+    const idempotencyKey = reviewDecisionIdempotencyKey(toolName, args);
+    const resolverRequest = Object.freeze({
+      approval_id: args.approval_id,
+      tool_name: toolName,
+      backend_transition: backendTransition,
+      project_id: args.project_id,
+      operation_id: args.operation_id,
+      operation_revision: args.operation_revision,
+      expected_workspace_digest: args.expected_workspace_digest,
+      idempotency_key: idempotencyKey,
+      caller_class: "model_orchestrator",
+    });
+
+    let authorizationEvidence;
+    try {
+      authorizationEvidence = await approvals.resolveApproval(resolverRequest);
+    } catch {
+      return fail("APPROVAL_UNAVAILABLE");
+    }
+
+    const mutationRequest = {
+      project_id: args.project_id,
+      operation_id: args.operation_id,
+      operation_revision: args.operation_revision,
+      expected_workspace_digest: args.expected_workspace_digest,
+      idempotency_key: idempotencyKey,
+      caller_class: "model_orchestrator",
+      authorization_evidence: authorizationEvidence,
+    };
+    if (!hasMutationEnvelopeShape(mutationRequest, { expectedTransition: toolName })) {
+      return fail("APPROVAL_INVALID");
+    }
+
+    const backendMethod = backendTransition === "accept"
+      ? backend.acceptChange
+      : backend.rejectChange;
+    const raw = await backendMethod(mutationRequest);
+    if (isPlainObject(raw) && raw.ok === false) {
+      return mapHumanTransitionDenial(raw) ?? fail("CHANGE_TRANSITION_DENIED");
+    }
+    const projected = sanitizeHumanTransitionResult(raw, args, {
+      backendTransition,
+      authorizationId: authorizationEvidence.authorization_id,
+    });
+    if (!projected) return fail("CHANGE_RESPONSE_INVALID");
+
+    const after = await getBoundProject(args.project_id);
+    if (after.error) return after.error;
+    const authoritative = projectProjection(after.project);
+    if (!authoritative || !sameProjectedProject(authoritative, projected)) {
+      return fail("CHANGE_STATE_DRIFT");
+    }
+
+    return Object.freeze({
+      ok: true,
+      transition: backendTransition,
+      project: projected,
+    });
+  }
+
+  async function changeAccept(args) {
+    return reviewDecision("website_change_accept", "accept", args);
+  }
+
+  async function changeReject(args) {
+    return reviewDecision("website_change_reject", "reject", args);
+  }
   const visibleTools = Object.freeze(
     TOOL_DEFINITIONS.filter((tool) => {
       if (tool.name === "website_local_files_find") return localFiles !== null;
       if (tool.name === "website_asset_import") return assetImportComposed;
+      if (["website_change_prepare", "website_change_apply"].includes(tool.name)) {
+        return mutationComposed;
+      }
+      if (["website_change_accept", "website_change_reject"].includes(tool.name)) {
+        return reviewDecisionComposed;
+      }
       return true;
     }),
   );
@@ -965,6 +1498,10 @@ export function createStaticWebsiteToolset({
     website_preview_get: previewGet,
     website_local_files_find: localFilesFind,
     website_asset_import: assetImport,
+    website_change_prepare: changePrepare,
+    website_change_apply: changeApply,
+    website_change_reject: changeReject,
+    website_change_accept: changeAccept,
   });
 
   async function callTool(name, args) {
@@ -976,6 +1513,14 @@ export function createStaticWebsiteToolset({
     if (name === "website_asset_import" && !assetImportComposed) {
       return fail("CAPABILITY_UNAVAILABLE");
     }
+    if (
+      ["website_change_prepare", "website_change_apply"].includes(name)
+      && !mutationComposed
+    ) return fail("CAPABILITY_UNAVAILABLE");
+    if (
+      ["website_change_accept", "website_change_reject"].includes(name)
+      && !reviewDecisionComposed
+    ) return fail("CAPABILITY_UNAVAILABLE");
     if (closing || closed) return fail("TOOLSET_CLOSED");
 
     const valid = name === "website_project_status"
@@ -986,7 +1531,13 @@ export function createStaticWebsiteToolset({
           ? validateLocalFilesRequest(args)
           : name === "website_asset_import"
             ? validateAssetImportRequest(args)
-            : validateOperationBoundRequest(args);
+            : name === "website_change_prepare"
+              ? validateChangePrepareRequest(args)
+              : name === "website_change_apply"
+                ? validateChangeApplyRequest(args)
+                : ["website_change_accept", "website_change_reject"].includes(name)
+                  ? validateReviewDecisionRequest(args)
+                  : validateOperationBoundRequest(args);
     if (!valid) return fail("REQUEST_INVALID");
 
     try {
@@ -1009,6 +1560,16 @@ export function createStaticWebsiteToolset({
         || error?.code === "local_file_id_invalid"
       ) return fail("LOCAL_FILE_SOURCE_INVALID");
       if (name === "website_local_files_find") return fail("LOCAL_FILE_SOURCE_FAILURE");
+      if (
+        [
+          "website_change_prepare",
+          "website_change_apply",
+          "website_change_accept",
+          "website_change_reject",
+        ].includes(name)
+      ) {
+        return fail("CHANGE_BACKEND_FAILURE");
+      }
       if (name === "website_asset_import") {
         if (error?.code === "asset_project_unavailable") return fail("ASSET_PROJECT_UNAVAILABLE");
         if (error?.code === "asset_source_stale") return fail("LOCAL_FILE_STALE");
@@ -1060,6 +1621,8 @@ export function createStaticWebsiteToolset({
     executable_tool_names: Object.freeze(visibleTools.map((tool) => tool.name)),
     local_files_composed: localFiles !== null,
     asset_import_composed: assetImportComposed,
+    mutation_composed: mutationComposed,
+    review_decision_composed: reviewDecisionComposed,
   });
 
   return Object.freeze({

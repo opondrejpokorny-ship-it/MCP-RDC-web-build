@@ -13,14 +13,10 @@ import {
 
 const WINDOWS = process.platform === "win32";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BACKEND_INDEX = path.resolve(
-  HERE,
-  "..",
-  "..",
-  "RDC-web-build-backend",
-  "src",
-  "index.mjs",
-);
+const BACKEND_ROOT = process.env.RDC_WEB_BUILD_BACKEND_ROOT
+  ? path.resolve(process.env.RDC_WEB_BUILD_BACKEND_ROOT)
+  : path.resolve(HERE, "..", "..", "RDC-web-build-backend");
+const BACKEND_INDEX = path.join(BACKEND_ROOT, "src", "index.mjs");
 const BACKEND_AVAILABLE = fs.existsSync(BACKEND_INDEX);
 
 function tempRoot(label) {
